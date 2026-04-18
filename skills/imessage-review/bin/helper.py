@@ -58,6 +58,18 @@ MAX_SEARCH_LEN = 200
 MAX_TEXT_SNIPPET = 600
 MAX_CONTEXT_MESSAGES = 8
 
+# Send-side bounds. iMessage will accept much longer bodies, but capping here
+# limits blast radius if a request is malformed or adversarial. 4000 chars is
+# well above any plausible conversational message.
+MAX_SEND_LEN = 4000
+_SERVICE_ENUM = ("iMessage", "SMS")
+
+# osascript timeout — the send itself is sub-second; anything much longer
+# means Messages.app is hung or prompting for Automation permission.
+OSASCRIPT_TIMEOUT_S = 15
+
+import subprocess  # noqa: E402  — used only by send actions, keep the import local-ish
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -493,6 +505,69 @@ def validate_chat(v: Any) -> str:
     return v.strip()
 
 
+def validate_send_text(v: Any) -> str:
+    """Bounds-check a message body for outbound send.
+
+    Allows printable Unicode (including emoji) plus \\n, \\r, \\t. Rejects
+    other C0 control characters to avoid exotic payloads being relayed
+    through Messages.app.
+    """
+    if not isinstance(v, str):
+        raise ValueError("text must be a string")
+    if not v:
+        raise ValueError("text cannot be empty")
+    if len(v) > MAX_SEND_LEN:
+        raise ValueError(f"text too long ({len(v)} chars; max {MAX_SEND_LEN})")
+    for ch in v:
+        if ord(ch) < 0x20 and ch not in ("\n", "\r", "\t"):
+            raise ValueError(
+                f"text contains disallowed control character U+{ord(ch):04X}"
+            )
+    return v
+
+
+def validate_service(v: Any) -> str:
+    """Normalize the send service. Defaults to iMessage when omitted."""
+    if v is None:
+        return "iMessage"
+    if v not in _SERVICE_ENUM:
+        raise ValueError(
+            f"service must be one of {_SERVICE_ENUM}, got {v!r}"
+        )
+    return v
+
+
+# ---------------------------------------------------------------------------
+# AppleScript shellout (send path only)
+# ---------------------------------------------------------------------------
+def _escape_as_string(s: str) -> str:
+    """Escape a Python string for embedding as an AppleScript string literal.
+
+    AppleScript string literals are double-quoted; only `"` and `\\` need
+    to be escaped. We do NOT try to escape arbitrary message bodies this
+    way — those are handed to AppleScript via a tempfile to sidestep the
+    whole class of escaping bugs. This helper is for short, already-
+    validated fields like the recipient identifier and the tempfile path.
+    """
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _run_osascript(script: str, timeout: float = OSASCRIPT_TIMEOUT_S
+                   ) -> tuple[int, str, str]:
+    """Run `script` via osascript (fed on stdin). Returns (rc, stdout, stderr).
+
+    Separated out from the action functions so tests can monkeypatch it.
+    """
+    r = subprocess.run(
+        ["/usr/bin/osascript", "-"],
+        input=script,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+
+
 # ---------------------------------------------------------------------------
 # DB handling
 # ---------------------------------------------------------------------------
@@ -827,12 +902,127 @@ def action_contacts_lookup(params, conn, contacts, blocklist):
     return {"query": name, "match_count": len(matches), "matches": matches[:25]}
 
 
+# ---------------------------------------------------------------------------
+# Send actions (AppleScript-driven)
+# ---------------------------------------------------------------------------
+def _resolve_contact_name(to: str, contacts: dict[str, str]) -> str:
+    """Best-effort name lookup from phone-shaped targets.
+
+    Emails and group-chat IDs return "" — not because we couldn't look
+    them up, but because the Contacts-side loader keys on normalized
+    10-digit phone numbers only.
+    """
+    key = _last10(to)
+    return contacts.get(key, "") if key else ""
+
+
+def action_send_preview(params, conn, contacts, blocklist):
+    """Non-destructive: resolve the recipient and return what *would* be sent.
+
+    Intended flow — the agent calls `send_preview` first, shows the preview
+    to the user (including any contact-name resolution and a "blocked"
+    flag if the target is in the blocklist), gets explicit confirmation,
+    then calls `send` with the same params. No server-side preview cache
+    is kept; this is a pure function of its inputs.
+    """
+    to = validate_chat(params.get("to"))
+    text = validate_send_text(params.get("text"))
+    service = validate_service(params.get("service"))
+
+    return {
+        "preview": {
+            "to": to,
+            "resolved_name": _resolve_contact_name(to, contacts),
+            "service": service,
+            "text": text,
+            "text_length": len(text),
+            "blocked": is_blocked(to, to, blocklist),
+        }
+    }
+
+
+action_send_preview.needs_db = False  # type: ignore[attr-defined]
+
+
+def action_send(params, conn, contacts, blocklist):
+    """Send an iMessage (or SMS via iPhone relay) via AppleScript.
+
+    The message body is written to a tempfile and read by AppleScript as
+    UTF-8, which sidesteps every AppleScript string-escape bug and lets us
+    send arbitrary Unicode (including emoji and newlines) unchanged.
+
+    Recipient identifiers are escaped inline as AppleScript string literals
+    because they've already passed `validate_chat` (≤200 chars, stripped).
+
+    The `service type` slot is an AppleScript enum, not a string. We pick
+    the clause statically from the validated service name so no untrusted
+    input is ever interpolated into that slot.
+    """
+    to = validate_chat(params.get("to"))
+    text = validate_send_text(params.get("text"))
+    service = validate_service(params.get("service"))
+
+    if is_blocked(to, to, blocklist):
+        raise ValueError(
+            f"refusing to send: {to!r} is in contacts/blocked_chats.txt"
+        )
+
+    if service == "iMessage":
+        svc_clause = "1st service whose service type = iMessage"
+    else:  # SMS — already validated against _SERVICE_ENUM
+        svc_clause = "1st service whose service type = SMS"
+
+    # Write the body to a tempfile, give AppleScript a POSIX path to it.
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", suffix=".txt", delete=False,
+        prefix="cowork_imessage_send_",
+    ) as f:
+        f.write(text)
+        body_path = f.name
+
+    try:
+        script = (
+            f'set msgBody to read POSIX file "{_escape_as_string(body_path)}" '
+            f'as «class utf8»\n'
+            f'tell application "Messages"\n'
+            f'    set svc to {svc_clause}\n'
+            f'    send msgBody to buddy "{_escape_as_string(to)}" of svc\n'
+            f'end tell\n'
+        )
+        rc, stdout, stderr = _run_osascript(script)
+        if rc != 0:
+            raise RuntimeError(
+                f"osascript send failed (rc={rc}): "
+                f"{stderr or stdout or 'no output'}"
+            )
+    finally:
+        try:
+            os.unlink(body_path)
+        except OSError:
+            pass
+
+    return {
+        "sent": {
+            "to": to,
+            "resolved_name": _resolve_contact_name(to, contacts),
+            "service": service,
+            "text_length": len(text),
+            "sent_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    }
+
+
+action_send.needs_db = False  # type: ignore[attr-defined]
+
+
 ACTIONS = {
     "review": action_review,
     "search": action_search,
     "chat_history": action_chat_history,
     "response_stats": action_response_stats,
     "contacts_lookup": action_contacts_lookup,
+    "send_preview": action_send_preview,
+    "send": action_send,
 }
 
 
@@ -871,12 +1061,19 @@ def process_request(req_path: Path, blocklist: list[str]) -> None:
 
     db_path = None
     try:
-        db_path = copy_chatdb()
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        conn.text_factory = bytes
+        action_fn = ACTIONS[action]
+        # Send-side actions declare needs_db=False; skip the (potentially
+        # hundreds-of-MB) chat.db snapshot on that path.
+        needs_db = getattr(action_fn, "needs_db", True)
+        conn = None
+        if needs_db:
+            db_path = copy_chatdb()
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            conn.text_factory = bytes
         contacts = load_contacts()
-        result = ACTIONS[action](params, conn, contacts, blocklist)
-        conn.close()
+        result = action_fn(params, conn, contacts, blocklist)
+        if conn is not None:
+            conn.close()
         result.update({"id": req_id, "action": action, "ok": True,
                        "generated_at": datetime.now().isoformat(timespec="seconds")})
         write_response(req_id, result)

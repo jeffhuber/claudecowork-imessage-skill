@@ -6,8 +6,9 @@ description: >
   reply", "search my iMessages", "show my chat history with", or wants
   response-time stats for a contact. Also covers sending a plain-text
   iMessage. macOS only — uses an on-device launchd helper to query the
-  Messages SQLite database, and Messages.app GUI automation for sending.
-version: 0.1.0
+  Messages SQLite database, and AppleScript (osascript) via the same helper
+  to send outbound messages.
+version: 0.3.0
 ---
 
 # iMessage on macOS — Cowork-native
@@ -41,8 +42,10 @@ Cowork folder, launchd fires a tiny signed wrapper binary that has Full Disk
 Access, the wrapper execs `helper.py`, and helper writes the JSON response
 back into the same folder where Claude can read it.
 
-For sending, no helper is involved — use the `mcp__computer-use__*` tools to
-drive Messages.app directly.
+Sending goes through the **same** request/response bridge. Claude writes a
+`send_preview` or `send` request, the helper calls `osascript` to drive
+Messages.app via AppleScript, and the result comes back as JSON. No GUI
+automation, no Computer Use clicks — just a short-lived subprocess.
 
 ## Prerequisites — one-time setup
 
@@ -141,6 +144,46 @@ Returns `sample_size`, `avg_seconds`, `avg_human` (e.g. `"18.3m"`),
 {"id": "abc", "action": "contacts_lookup", "params": {"name": "Angel"}}
 ```
 
+### `send_preview` — dry-run a send (no osascript, no chat.db)
+
+```json
+{"id": "abc", "action": "send_preview",
+ "params": {"to": "+14155551234", "text": "Confirmed for 3pm.",
+            "service": "iMessage"}}
+```
+
+Response includes the validated recipient, the resolved contact name (if any),
+the service, the text and its length, and whether the thread is on the
+blocklist. `send_preview` is declarative — it does *not* touch chat.db and
+does *not* send anything. Use it to confirm with the user before calling
+`send`.
+
+### `send` — actually send the message
+
+```json
+{"id": "abc", "action": "send",
+ "params": {"to": "+14155551234", "text": "Confirmed for 3pm.",
+            "service": "iMessage"}}
+```
+
+The helper writes `text` to a temporary UTF-8 file, shells out to
+`/usr/bin/osascript` with a short AppleScript that reads the file and tells
+Messages.app to send it to the addressed buddy on the requested service
+(`iMessage` or `SMS`). The tempfile is always removed, even on failure.
+
+Response on success includes `sent: {to, resolved_name, service,
+text_length, sent_at}`. On failure, the helper returns an error with the
+osascript stderr — typical causes are missing Automation permission for
+Messages (see "Sending messages" below) or a recipient that isn't
+reachable on the chosen service.
+
+**Refusal rules baked into the helper** — no way for Claude to override:
+- Text must be 1–4000 chars and contain no C0 control characters other
+  than `\n`, `\r`, `\t`.
+- `service` must be `"iMessage"`, `"SMS"`, or omitted (defaults to iMessage).
+- If the recipient matches an entry in `contacts/blocked_chats.txt`, `send`
+  raises `ValueError` before calling osascript.
+
 ## Example request flow
 
 ```python
@@ -165,23 +208,45 @@ data = json.loads(resp.read_text())
 
 ## Sending messages
 
-No helper — use computer-use. Steps:
+Sending is an action on the helper, same bridge as read actions. The helper
+uses AppleScript via `/usr/bin/osascript` to tell Messages.app to send the
+message — no GUI clicks, no Computer Use, just a subprocess that returns in
+under a second on average.
 
-1. `request_access(applications=["Messages"])`.
-2. `open_application(name="Messages")`.
-3. Press `Cmd-N` (new message) via `mcp__computer-use__key`.
-4. Type the recipient (contact name or phone). Wait for autocomplete to
-   resolve; take a screenshot and verify the contact that's highlighted
-   matches the user's intent. If more than one contact matches, show the
-   options and ask.
-5. Press `Tab` to move to the message body, `type` the text, screenshot.
-6. **Always confirm with the user before pressing Return.** Show the
-   resolved recipient + message text and wait for approval.
-7. Press `Return` to send.
-8. Screenshot to confirm the bubble appeared in the thread.
+**Recommended flow every time — preview, confirm, then send:**
 
-If Messages shows the "Send as SMS?" fallback sheet, stop and surface it to
-the user — the recipient may not have iMessage, or may be unreachable.
+1. Resolve the recipient. If the user said a name, run `contacts_lookup`
+   first. If there are multiple matches, surface them and ask. Use a raw
+   phone number (any format — last 10 digits match) or email if the user
+   prefers that.
+2. Issue a `send_preview` request. Show the user the resolved recipient
+   name, the service (iMessage / SMS), the full text, and `text_length`.
+3. **Wait for explicit user approval.** If the preview shows `blocked: true`,
+   tell the user and stop — don't prompt for approval to send anyway.
+4. Issue the `send` request. Surface `sent.sent_at` and the resolved name
+   back to the user as confirmation.
+
+### Why the helper instead of computer-use?
+
+Computer-use driving Messages.app was slow (5–15s for the full click-type-
+Return dance), flaky (autocomplete races, Send-as-SMS sheets, modal popups),
+and inherently imprecise (pixel-level clicks on a UI that can change
+between macOS releases). AppleScript's `tell application "Messages"` API
+takes a recipient + service + body and dispatches the message directly. For
+the same confirmation-safety model, we gate it behind `send_preview` +
+explicit user OK before calling `send`.
+
+### Automation permission (one-time, separate from Full Disk Access)
+
+The first time the helper calls `osascript` to send via Messages, macOS
+will show an Automation prompt: "cowork-imessage-helper wants to control
+Messages." Click **OK**. After that, the grant lives under:
+
+  System Settings → Privacy & Security → Automation →
+    cowork-imessage-helper → Messages (toggle on)
+
+If the wrapper binary is rebuilt with a different CDHash, the grant needs
+to be removed and re-added (same as Full Disk Access).
 
 ## Common pitfalls
 

@@ -159,5 +159,12 @@ echo "  4. (If prompted to quit and reopen anything, just click 'Later'.)"
 echo
 echo "Verify by asking Claude: \"review my imessages over the last 2 days\""
 echo
+yellow "Note on sending (v0.3.0+):"
+echo "  The first time you ask Claude to send an iMessage, macOS will"
+echo "  prompt 'cowork-imessage-helper wants to control Messages.' Click OK."
+echo "  After that, the grant lives under:"
+echo "    System Settings -> Privacy & Security -> Automation"
+echo "  (This is a separate permission from Full Disk Access.)"
+echo
 echo "Logs: $CONTROL_DIR/log.txt"
 echo "Uninstall: ./uninstall.sh"

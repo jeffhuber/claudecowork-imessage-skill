@@ -5,14 +5,51 @@ Read, search, and analyze your iMessages on macOS from inside Claude Cowork.
 ## What's in the box
 
 - **Skill** `imessage-review` — teaches Claude the full protocol for reading
-  the Messages database via an on-device helper. Triggers on natural
-  language like "show me iMessages from X", "triage my unread messages",
-  "average reply time to Y", etc.
-- **Command** `/imessages [days]` — one-shot triage of the last N days
-  (default 2). Categorizes threads into needs-reply / low-priority / skipped.
+  and sending iMessages via an on-device helper. Triggers on natural
+  language like *"show me iMessages from X"*, *"triage my unread
+  messages"*, *"average reply time to Y"*, *"text Alice: see you at 3"*.
+- **Command** `/imessage-review:imessages [days]` — one-shot triage of the
+  last N days (default 2). Categorizes threads into needs-reply /
+  low-priority / skipped.
 - **Bundled helper** — source for a tiny hardened C wrapper that holds the
   Full Disk Access grant, plus the Python worker that reads `chat.db`,
-  resolves contacts, redacts sensitive content, and writes JSON responses.
+  resolves contacts, redacts sensitive content, drives `osascript` for
+  outbound sends, and writes JSON responses.
+
+## What it does
+
+Seven helper actions. All take a short JSON request and return a JSON
+response via the bridge folder. Claude picks the right one from plain
+English — you generally don't need to know the action names.
+
+| Action | Ask Claude something like | What it does |
+|---|---|---|
+| `review` | *"Triage my iMessages from the last 2 days."* | Sorts every thread into `needs reply` / `low priority` / `skipped`, with full text for the needs-reply bucket. |
+| `search` | *"Find messages mentioning 'quarterly review' in the last month."* | Substring search across every thread. Scopes by days + result limit. |
+| `chat_history` | *"Show me the last 50 messages with the sales-team group chat."* | Pulls recent messages from one conversation. Accepts name, phone, email, or group-chat ID. |
+| `response_stats` | *"How fast have I been replying to my manager this week?"* | Avg / median / min / max reply time, plus inbound vs. outbound counts. |
+| `contacts_lookup` | *"Look up contacts named 'Smith'."* | Disambiguates by name. Useful before `chat_history` on an ambiguous name. |
+| `send_preview` | *(used implicitly by the skill before every send)* | Dry-run of a `send` — validates recipient + body, resolves the contact name, flags blocklisted threads. No osascript call, no chat.db read. |
+| `send` | *"Text +14155551234: 'Confirmed for Thursday at 3pm.'"* | Actually delivers the message via AppleScript (`tell application "Messages"`). Always preceded by `send_preview` and explicit user approval. |
+
+**Chained workflows** Claude handles naturally because the read + send
+actions share a bridge:
+
+- *"Triage the last day, then draft replies to anything actionable."*
+- *"Find any mention of 'invoice' in the last 60 days, group by sender."*
+- *"Who has the slowest reply time from me this week? Top 5 with stats."*
+- *"Text Angel back with a thumbs-up and propose Thursday at 2pm instead."*
+
+**What the plugin won't do:**
+
+- No attachments, images, stickers, audio, or Tapback reactions (outbound
+  or inbound — text fields only).
+- No editing or deleting previously sent messages.
+- No message effects (balloons, confetti, invisible ink).
+- No group-chat creation. Can send *to* an existing group-chat ID, but
+  not stand one up.
+- Only reads your local `chat.db` — if a thread hasn't synced to this
+  Mac, it won't appear in search / review.
 
 ## How it works
 
@@ -31,8 +68,11 @@ response back into the same folder — where Claude can then read it.
   reads response.json  <-----------------/
 ```
 
-Sending iMessages uses Claude's Computer Use to drive Messages.app directly
-(no helper involvement).
+Sending iMessages runs through the **same** bridge: Claude writes a `send`
+request, the helper shells out to `/usr/bin/osascript` with a short
+AppleScript that tells Messages.app to send the message via iMessage or SMS.
+No GUI automation. One subprocess, typically under a second end to end. See
+[Sending below](#sending).
 
 ## Install
 
@@ -66,12 +106,67 @@ zip -r imessage-review.plugin . -x "*.DS_Store" "__pycache__/*" "*/__pycache__/*
 Then drag `imessage-review.plugin` into Cowork and continue with steps 3–6
 above.
 
+## Sending
+
+As of v0.3.0, sending is a **first-class helper action** — no Computer Use,
+no GUI automation. Claude writes a `send` request into the bridge folder,
+the helper shells out to `/usr/bin/osascript` with a short AppleScript
+that tells Messages.app to deliver the message. Typical round-trip is
+under a second.
+
+### How to use it
+
+Just ask Claude in plain English:
+
+> "Text +14155551234: 'Confirmed for Thursday at 3pm.'"
+
+Claude will:
+
+1. Run a `send_preview` to show you the resolved recipient, service
+   (iMessage vs. SMS), and full text.
+2. **Wait for your explicit OK.** Nothing sends until you confirm.
+3. Run `send`. The helper writes your text to a UTF-8 tempfile, invokes
+   `osascript`, and deletes the tempfile whether the send succeeds or
+   fails.
+
+### One-time permission: Automation → Messages
+
+On the first send, macOS shows an Automation prompt — *"cowork-imessage-
+helper wants to control Messages"*. Click **OK**. After that, the grant
+lives under:
+
+  System Settings → Privacy & Security → Automation →
+    cowork-imessage-helper → Messages
+
+This is a **different permission** from Full Disk Access. FDA lets the
+helper read `chat.db`; Automation lets it drive Messages.app via
+AppleScript.
+
+### What gets validated before osascript even runs
+
+- Recipient is a phone number / email / group-chat ID (up to 200 chars).
+- Text is 1–4000 UTF-8 characters with no C0 control bytes other than
+  `\n`, `\r`, `\t`.
+- Service is `iMessage`, `SMS`, or unset (defaults to iMessage).
+- Recipient is **not** on `contacts/blocked_chats.txt` — blocklist still
+  applies to outbound as well as inbound.
+
+### What it can't do
+
+- Attachments / images / stickers / replies-to-specific-message — AppleScript
+  exposes a simple `send <text> to <buddy>` shape. Plain text only.
+- Message effects (balloon, confetti, etc.).
+- Group-chat creation. You can send *to* an existing group-chat ID, not
+  stand up a new one.
+
 ## Requirements
 
-- macOS (the helper is Apple-specific — SQLite + launchd + Contacts.app).
+- macOS (the helper is Apple-specific — SQLite + launchd + Contacts.app +
+  osascript).
 - Xcode Command Line Tools (`xcode-select --install`) — for `clang` and
   `codesign` during install.
 - Python 3 (uses `/usr/bin/python3` if available, otherwise `$PATH`).
+- `/usr/bin/osascript` — ships with macOS, used for sending.
 
 ## Privacy
 
@@ -178,13 +273,28 @@ macOS release could rename a column and break the helper until someone
 patches the queries. Same applies to the `attributedBody` typedstream
 format that the decoder in `helper.py` reverse-engineers.
 
-### The helper reads; the sender path is GUI automation
+### Sending relies on AppleScript + the Messages.app Automation grant
 
-Reading is clean (launchd + SQLite). **Sending** is done by driving
-Messages.app with Computer Use — typing into text fields, pressing return.
-That path is inherently flakier than an API call and can fail in subtle
-ways (wrong thread selected if Messages is mid-scroll, stuck at a
-confirmation dialog, etc.). Review before hitting send.
+Sending goes through the helper, which calls `/usr/bin/osascript` with a
+short AppleScript `tell application "Messages"` block. That means:
+
+- The first send triggers a macOS Automation prompt — you have to click
+  **OK** to let the helper control Messages.app. The grant lives under
+  System Settings → Privacy & Security → Automation.
+- AppleScript will happily send to a `buddy` handle that doesn't have
+  iMessage coverage; the helper does minimal validation beyond
+  "is-it-a-string". If you send to a number that can't receive iMessage
+  and you picked `service: iMessage`, the osascript call errors out and
+  nothing is delivered — switch to `service: SMS`.
+- There's no "sent successfully to the network" confirmation. The helper
+  only confirms that osascript returned 0. If the recipient blocks you or
+  the network is down, iMessage will show the red ! bubble in
+  Messages.app, but the helper won't know.
+
+The tradeoff vs. the previous Computer-Use path is speed (sub-second vs.
+5–15s), reliability (no pixel races), and the same "preview + explicit
+user approval before the send request" safety model baked into the skill
+instructions.
 
 ## Uninstall
 

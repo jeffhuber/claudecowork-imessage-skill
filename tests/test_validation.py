@@ -181,6 +181,8 @@ class ActionWhitelistTests(unittest.TestCase):
         "chat_history",
         "response_stats",
         "contacts_lookup",
+        "send_preview",
+        "send",
     })
 
     def test_action_set_is_exactly_expected(self):

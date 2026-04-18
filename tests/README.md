@@ -29,6 +29,7 @@ validation functions.
 | `test_attributed_body.py` | The hand-rolled typedstream decoder — known-good blobs, malformed input, empty/None, length-prefix variants, silent-failure cases. |
 | `test_redaction.py` | The `redact()` pipeline — 2FA codes, credit card numbers, SSNs, and a documented set of known bypasses we have *not* yet closed. |
 | `test_validation.py` | Request-parameter validators — bounds checking, type coercion, rejection of malformed input, action whitelist enforcement. |
+| `test_send.py` | `send_preview` and `send` actions — text / service validators, AppleScript string escaping, tempfile lifecycle, blocklist-respect on outbound, `needs_db` short-circuit for send actions. `osascript` is mocked; no real messages go out during the test run. |
 
 ## What's NOT covered
 
