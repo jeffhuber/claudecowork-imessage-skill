@@ -1,0 +1,9 @@
+{
+  "name": "imessage-review",
+  "version": "0.2.0",
+  "description": "Read, search, and analyze iMessages on macOS from Claude Cowork, plus a helper-driven bridge for fast on-device queries",
+  "author": {
+    "name": "Jeff Huber"
+  },
+  "keywords": ["imessage", "messages", "macos", "cowork", "triage"]
+}

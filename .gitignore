@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Build artifacts (per-machine — users build locally via install.sh)
+bin/cowork-imessage-helper
+*.plugin
+
+# Editor scratch
+*.swp
+.idea/
+.vscode/
