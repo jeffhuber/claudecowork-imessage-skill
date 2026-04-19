@@ -43,6 +43,43 @@ The plugin *code* only reads `chat.db`. But a bug or compromise in
 the helper becomes a full-user-file-read primitive, not just a
 Messages leak. Treat that as the blast radius.
 
+### The CDHash pins the wrapper, not the Python
+
+The TCC grant for Full Disk Access is bound to the C wrapper's
+CDHash. That stabilizes the grant across OS updates that would
+otherwise re-hash `/usr/bin/python3`, but it does not extend any
+authentication to `helper.py` itself. The wrapper's one and only job
+is to `exec` `helper.py`, and `helper.py` lives in the user-writable
+bridge folder (`~/cowork-imessage/bin/helper.py`, mode 600 but owned
+by you).
+
+That means any process running as your user with write access to the
+bridge folder can overwrite `helper.py` with its own Python, and the
+very next `launchd` trigger will run that replacement under the
+wrapper's CDHash and inherit FDA. A tampered `helper.py` would:
+
+- Bypass the v0.4.0 helper-side send gate — a replacement simply
+  wouldn't check nonces.
+- Exfiltrate message content via any channel the attacker chose:
+  stdout, an HTTP POST, a file they read later.
+- Silently defeat any future read-path authentication (HMAC or
+  otherwise), because authentication is enforced by the helper, and
+  the helper has been replaced.
+
+This is the same threat class covered by the "malicious supply-chain
+packages running as your user" caveat below — a process that can
+write into your `$HOME` can compromise the plugin by replacing
+`helper.py`, full stop. The helper-side gates are defense in depth
+against accidents and unsophisticated attackers; they are not a
+barrier against an attacker with user-UID write access to the bridge
+folder.
+
+A stricter posture — installing `helper.py` to a root-owned path
+like `/usr/local/libexec/cowork-imessage/helper.py` via `sudo` in
+`install.sh` — is a plausible future mitigation but is not currently
+shipped. Until then, treat the bridge folder as part of the trusted
+compute base: if something can write there, it owns the helper.
+
 ### Automation → Messages (v0.3.0+)
 
 Required to send. The first send triggers a one-time macOS prompt:
