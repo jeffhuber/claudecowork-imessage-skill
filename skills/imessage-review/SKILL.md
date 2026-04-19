@@ -8,7 +8,7 @@ description: >
   iMessage. macOS only — uses an on-device launchd helper to query the
   Messages SQLite database, and AppleScript (osascript) via the same helper
   to send outbound messages.
-version: 0.3.0
+version: 0.4.0
 ---
 
 # iMessage on macOS — Cowork-native
@@ -158,13 +158,33 @@ blocklist. `send_preview` is declarative — it does *not* touch chat.db and
 does *not* send anything. Use it to confirm with the user before calling
 `send`.
 
+The response ALSO includes a `send_nonce` (a short opaque string) and
+`send_nonce_ttl_seconds` (default 60). You MUST echo `send_nonce` back in
+the subsequent `send` request's `params`. The helper binds the nonce to
+the exact previewed `(to, text, service)` triple; a missing, stale, replayed,
+or payload-mismatched nonce causes `send` to be refused.
+
+```json
+{"id": "abc", "ok": true, "action": "send_preview",
+ "preview": {"to": "+14155551234", "resolved_name": "Alex",
+             "service": "iMessage", "text": "Confirmed for 3pm.",
+             "text_length": 18, "blocked": false},
+ "send_nonce": "Zk9...short-opaque-string",
+ "send_nonce_ttl_seconds": 60}
+```
+
 ### `send` — actually send the message
 
 ```json
 {"id": "abc", "action": "send",
  "params": {"to": "+14155551234", "text": "Confirmed for 3pm.",
-            "service": "iMessage"}}
+            "service": "iMessage",
+            "send_nonce": "Zk9...short-opaque-string"}}
 ```
+
+The `send_nonce` is the one returned by the preceding `send_preview`. The
+`to`, `text`, and `service` must match the preview exactly — change any of
+them and you'll need to `send_preview` again.
 
 The helper writes `text` to a temporary UTF-8 file, shells out to
 `/usr/bin/osascript` with a short AppleScript that reads the file and tells
@@ -172,10 +192,11 @@ Messages.app to send it to the addressed buddy on the requested service
 (`iMessage` or `SMS`). The tempfile is always removed, even on failure.
 
 Response on success includes `sent: {to, resolved_name, service,
-text_length, sent_at}`. On failure, the helper returns an error with the
-osascript stderr — typical causes are missing Automation permission for
-Messages (see "Sending messages" below) or a recipient that isn't
-reachable on the chosen service.
+text_length, sent_at}`. On failure, the helper returns an error. Typical
+causes: missing Automation permission for Messages (see "Sending messages"
+below), a recipient that isn't reachable on the chosen service, or a
+send-gate error (`"send gate: ..."` / `"missing nonce; call send_preview
+first"` / `"send payload differs from preview"`).
 
 **Refusal rules baked into the helper** — no way for Claude to override:
 - Text must be 1–4000 chars and contain no C0 control characters other
@@ -183,6 +204,10 @@ reachable on the chosen service.
 - `service` must be `"iMessage"`, `"SMS"`, or omitted (defaults to iMessage).
 - If the recipient matches an entry in `contacts/blocked_chats.txt`, `send`
   raises `ValueError` before calling osascript.
+- `send` requires a fresh, payload-bound `send_nonce` minted by a prior
+  `send_preview` within `send_nonce_ttl_seconds` (default 60s). Skipping
+  the preview step, or tampering with the body between preview and send,
+  is rejected helper-side. (v0.4.0+)
 
 ## Example request flow
 
@@ -221,10 +246,14 @@ under a second on average.
    prefers that.
 2. Issue a `send_preview` request. Show the user the resolved recipient
    name, the service (iMessage / SMS), the full text, and `text_length`.
+   Keep the `send_nonce` from the response.
 3. **Wait for explicit user approval.** If the preview shows `blocked: true`,
    tell the user and stop — don't prompt for approval to send anyway.
-4. Issue the `send` request. Surface `sent.sent_at` and the resolved name
-   back to the user as confirmation.
+4. Issue the `send` request with the **same** `to`/`text`/`service` and the
+   `send_nonce` from step 2. If user approval takes longer than
+   `send_nonce_ttl_seconds` (default 60), re-run `send_preview` to mint a
+   fresh nonce. Surface `sent.sent_at` and the resolved name back to the
+   user as confirmation.
 
 ### Why the helper instead of computer-use?
 
@@ -293,6 +322,7 @@ threads here.
 | `com.user.cowork-imessage.plist.template` | launchd agent template. Filled in by `install.sh` and copied to `~/Library/LaunchAgents/`. |
 | `bin/cowork_imessage_helper.c` | Tiny hardened wrapper. FDA is granted to this. Ignores argv, sanitizes environment, execs helper.py. |
 | `bin/helper.py` | Python helper. Scans `control/requests/`, dispatches actions, writes `control/responses/response-*.json`. |
+| `bin/send_gate.py` | Helper-side preview/confirm gate. Mints single-use nonces on `send_preview`, consumes them on `send`. Persists under `<bridge>/nonces/`. (v0.4.0+) |
 
 ## Files created at the user's bridge folder (after install)
 
@@ -303,3 +333,4 @@ threads here.
 | `control/responses/` | Helper writes response JSON here. Agent reads. |
 | `control/log.txt` | Helper stderr + logging. First place to check when debugging. |
 | `bin/cowork-imessage-helper` | Compiled, ad-hoc signed wrapper (the FDA target). |
+| `nonces/` | Short-lived per-nonce files bound to previewed sends. Created on first preview; TTL-reaped on every helper run. (v0.4.0+) |

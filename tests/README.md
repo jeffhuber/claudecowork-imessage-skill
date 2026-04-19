@@ -29,7 +29,8 @@ validation functions.
 | `test_attributed_body.py` | The hand-rolled typedstream decoder — known-good blobs, malformed input, empty/None, length-prefix variants, silent-failure cases. |
 | `test_redaction.py` | The `redact()` pipeline — 2FA codes, credit card numbers, SSNs, and a documented set of known bypasses we have *not* yet closed. |
 | `test_validation.py` | Request-parameter validators — bounds checking, type coercion, rejection of malformed input, action whitelist enforcement. |
-| `test_send.py` | `send_preview` and `send` actions — text / service validators, AppleScript string escaping, tempfile lifecycle, blocklist-respect on outbound, `needs_db` short-circuit for send actions. `osascript` is mocked; no real messages go out during the test run. |
+| `test_send.py` | `send_preview` and `send` actions — text / service validators, AppleScript string escaping, tempfile lifecycle, blocklist-respect on outbound, `needs_db` short-circuit for send actions. Also covers the v0.4.0+ helper-side send gate: `action_send` refusing missing / bogus / mismatched / replayed nonces, and the preview-then-send round trip. `osascript` is mocked; no real messages go out during the test run. |
+| `test_send_gate.py` | The nonce gate in isolation (`send_gate.py`) — mint/consume round-trip, single-use semantics, payload binding, TTL expiry, path-traversal rejection, and the reaper. (v0.4.0+) |
 
 ## What's NOT covered
 

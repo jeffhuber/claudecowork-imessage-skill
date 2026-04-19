@@ -1,6 +1,6 @@
 {
   "name": "imessage-review",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Read, search, triage, and send iMessages on macOS from Claude Cowork. Helper-driven bridge for fast on-device queries; AppleScript/osascript for sending.",
   "author": {
     "name": "Jeff Huber"

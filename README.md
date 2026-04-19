@@ -150,6 +150,12 @@ AppleScript.
 - Service is `iMessage`, `SMS`, or unset (defaults to iMessage).
 - Recipient is **not** on `contacts/blocked_chats.txt` — blocklist still
   applies to outbound as well as inbound.
+- **(v0.4.0+)** A fresh, payload-bound `send_nonce` minted by a prior
+  `send_preview` within the last 60 seconds is present on the `send`
+  request. The helper refuses sends without one, sends whose body has
+  been changed after preview, and sends that replay a used nonce. This
+  puts the preview/confirm gate in the helper rather than in the skill
+  prompt — a compromised client can't skip the preview step.
 
 ### What it can't do
 
@@ -294,7 +300,26 @@ short AppleScript `tell application "Messages"` block. That means:
 The tradeoff vs. the previous Computer-Use path is speed (sub-second vs.
 5–15s), reliability (no pixel races), and the same "preview + explicit
 user approval before the send request" safety model baked into the skill
-instructions.
+instructions — now enforced helper-side (v0.4.0+) via a single-use nonce,
+so the preview step can't be skipped even by a compromised client.
+
+## Changelog
+
+- **v0.4.0** — **Helper-side send gate.** `send_preview` now mints a
+  single-use, payload-bound `send_nonce` (60 s TTL). `send` must echo
+  it back and carry an identical `to`/`text`/`service`; otherwise the
+  helper refuses. Replay, stale, missing, and payload-swap attempts are
+  all rejected. Preview/confirm is now enforced on the helper, not in
+  the skill prompt. Zero install-UX change. No helper rebuild needed on
+  upgrade (the C wrapper's CDHash is unchanged — FDA and Automation
+  grants are preserved).
+- **v0.3.0** — Sending is a first-class helper action via AppleScript
+  + `osascript`. Removed Computer-Use dependency for sends. `send` and
+  `send_preview` actions added; recipient / body validation, tempfile
+  body handling, and outbound blocklist enforcement.
+- **v0.2.0** — Read-side hardening: blocklist, redaction, `attributedBody`
+  decoder, read actions (`review` / `search` / `chat_history` /
+  `response_stats` / `contacts_lookup`).
 
 ## Uninstall
 

@@ -48,6 +48,35 @@ RESPONSES_DIR = INSTALL_ROOT / "control" / "responses"
 LOG_PATH = INSTALL_ROOT / "control" / "log.txt"
 BLOCKLIST_PATH = INSTALL_ROOT / "contacts" / "blocked_chats.txt"
 
+# ---------------------------------------------------------------------------
+# Sibling module loading
+# ---------------------------------------------------------------------------
+# The C wrapper runs python3 with `-I` (isolated mode), which deliberately
+# prevents sys.path[0] from being set to this file's directory — it blocks
+# the "drop a malicious foo.py into bin/ and watch helper.py import it"
+# attack. We honor that hardening by loading our known-good sibling module
+# by its absolute baked-in path rather than by ordinary import.
+import importlib.util as _importlib_util  # noqa: E402
+
+
+def _load_sibling(name: str):
+    path = INSTALL_ROOT / "bin" / f"{name}.py"
+    spec = _importlib_util.spec_from_file_location(name, path)
+    mod = _importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# Route send_gate's state to our install tree so a non-default install
+# (helper lives somewhere other than ~/cowork-imessage/) still works.
+os.environ.setdefault("COWORK_IMESSAGE_BRIDGE_DIR", str(INSTALL_ROOT))
+_send_gate = _load_sibling("send_gate")
+SEND_NONCE_TTL = _send_gate.SEND_NONCE_TTL
+SendGateError = _send_gate.SendGateError
+mint_send_nonce = _send_gate.mint_send_nonce
+consume_send_nonce = _send_gate.consume_send_nonce
+reap_expired_nonces = _send_gate.reap_expired_nonces
+
 APPLE_EPOCH = 978_307_200  # seconds between 1970-01-01 and 2001-01-01
 
 # Parameter bounds. Over these limits we reject rather than return partial data.
@@ -922,12 +951,17 @@ def action_send_preview(params, conn, contacts, blocklist):
     Intended flow — the agent calls `send_preview` first, shows the preview
     to the user (including any contact-name resolution and a "blocked"
     flag if the target is in the blocklist), gets explicit confirmation,
-    then calls `send` with the same params. No server-side preview cache
-    is kept; this is a pure function of its inputs.
+    then calls `send` with the same params AND echoes back the `send_nonce`
+    we mint here. v0.4.0+: the nonce is bound to the exact previewed
+    payload and expires after SEND_NONCE_TTL seconds, so a forged `send`
+    that skips preview — or swaps the body between preview and send — is
+    rejected helper-side.
     """
     to = validate_chat(params.get("to"))
     text = validate_send_text(params.get("text"))
     service = validate_service(params.get("service"))
+
+    send_nonce = mint_send_nonce(to, text, service)
 
     return {
         "preview": {
@@ -937,7 +971,9 @@ def action_send_preview(params, conn, contacts, blocklist):
             "text": text,
             "text_length": len(text),
             "blocked": is_blocked(to, to, blocklist),
-        }
+        },
+        "send_nonce": send_nonce,
+        "send_nonce_ttl_seconds": SEND_NONCE_TTL,
     }
 
 
@@ -966,6 +1002,13 @@ def action_send(params, conn, contacts, blocklist):
         raise ValueError(
             f"refusing to send: {to!r} is in contacts/blocked_chats.txt"
         )
+
+    # v0.4.0+: helper-side send gate. `send_preview` must have been called
+    # first for this exact (to, text, service) triple, and the resulting
+    # single-use nonce must be echoed back within the TTL window. This
+    # enforces preview-then-confirm even if the bridge has been bypassed
+    # by some process writing directly into control/requests/.
+    consume_send_nonce(params.get("send_nonce"), to, text, service)
 
     if service == "iMessage":
         svc_clause = "1st service whose service type = iMessage"
@@ -1092,6 +1135,14 @@ def main() -> None:
     REQUESTS_DIR.mkdir(parents=True, exist_ok=True)
     RESPONSES_DIR.mkdir(parents=True, exist_ok=True)
     blocklist = load_blocklist()
+
+    # v0.4.0+: garbage-collect stale send nonces from previews that never
+    # got a matching send (user cancelled, Claude crashed). Cheap; touches
+    # only ~/cowork-imessage/nonces/ and only a few files at most.
+    try:
+        reap_expired_nonces()
+    except Exception as e:
+        log(f"reap_expired_nonces error: {e!r}")
 
     pending = sorted(REQUESTS_DIR.glob("request-*.json"))
     if not pending:

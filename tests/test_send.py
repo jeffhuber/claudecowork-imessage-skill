@@ -17,12 +17,41 @@ Coverage:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _helper_loader import helper  # noqa: E402
+
+# helper.py loads send_gate via importlib (because the C wrapper uses -I,
+# which takes sys.path[0] out from under a plain `import`). That loader
+# creates a DISTINCT module object — so `helper._send_gate.SendGateError`
+# is a different class from `import send_gate`'s SendGateError. Tests must
+# reach for helper's copy if they want `isinstance` to work against what
+# the helper actually raises.
+send_gate = helper._send_gate
+
+
+def _mint(to, text, service="iMessage"):
+    """Produce a fresh payload-bound send_nonce so tests can call
+    action_send without first going through send_preview."""
+    return send_gate.mint_send_nonce(to, text, service)
+
+
+class _BridgeDirMixin:
+    """Route send_gate state (mint_send_nonce, consume_send_nonce, reap)
+    at a per-test tempdir so tests don't touch ~/cowork-imessage/nonces."""
+
+    def setUp(self):
+        self._bridge_tmp = tempfile.mkdtemp(prefix="cowork-imessage-test-")
+        os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = self._bridge_tmp
+
+    def tearDown(self):
+        os.environ.pop("COWORK_IMESSAGE_BRIDGE_DIR", None)
+        shutil.rmtree(self._bridge_tmp, ignore_errors=True)
 
 
 class ValidateSendTextTests(unittest.TestCase):
@@ -118,10 +147,13 @@ class EscapeAsStringTests(unittest.TestCase):
         self.assertEqual(helper._escape_as_string("café 🎉"), "café 🎉")
 
 
-class SendPreviewTests(unittest.TestCase):
-    """`send_preview` is a pure function of its inputs. No side effects."""
+class SendPreviewTests(_BridgeDirMixin, unittest.TestCase):
+    """`send_preview` returns the resolved preview dict plus a single-use
+    send_nonce. Aside from the nonce file it writes under
+    `<bridge>/nonces/` it has no side effects."""
 
     def setUp(self):
+        super().setUp()
         self.contacts = {"4155551234": "Alice Example"}
         self.blocklist = ["+18005551212"]
 
@@ -136,6 +168,11 @@ class SendPreviewTests(unittest.TestCase):
         self.assertEqual(out["preview"]["text"], "hey")
         self.assertEqual(out["preview"]["text_length"], 3)
         self.assertFalse(out["preview"]["blocked"])
+        # v0.4.0+: a nonce is minted and surfaced for the subsequent send.
+        self.assertIn("send_nonce", out)
+        self.assertIsInstance(out["send_nonce"], str)
+        self.assertTrue(out["send_nonce"])
+        self.assertEqual(out["send_nonce_ttl_seconds"], send_gate.SEND_NONCE_TTL)
 
     def test_default_service_is_imessage(self):
         out = helper.action_send_preview(
@@ -182,21 +219,35 @@ class SendPreviewTests(unittest.TestCase):
             )
 
 
-class SendActionTests(unittest.TestCase):
+class SendActionTests(_BridgeDirMixin, unittest.TestCase):
     """End-to-end send behavior with osascript fully mocked out."""
 
     def setUp(self):
+        super().setUp()
         self.contacts = {"4155551234": "Alice Example"}
         self.blocklist = ["+18005551212"]
 
-    def _run(self, params, osascript_result=(0, "", "")):
-        """Invoke action_send with a mocked osascript. Returns (result, script)."""
+    def _run(self, params, osascript_result=(0, "", ""), skip_nonce=False):
+        """Invoke action_send with a mocked osascript. Returns (result, script).
+
+        By default mints a fresh send_nonce for the params' (to, text, service)
+        before calling action_send, so callers don't have to open-code the
+        preview step. Pass skip_nonce=True to test the gate's refusal path.
+        """
         captured = {}
 
         def fake_run(script, timeout=None):
             captured["script"] = script
             captured["timeout"] = timeout
             return osascript_result
+
+        if not skip_nonce and "send_nonce" not in params:
+            params = dict(params)  # don't mutate caller's dict
+            params["send_nonce"] = _mint(
+                params["to"],
+                params["text"],
+                params.get("service", "iMessage"),
+            )
 
         with mock.patch.object(helper, "_run_osascript", side_effect=fake_run):
             result = helper.action_send(
@@ -265,7 +316,8 @@ class SendActionTests(unittest.TestCase):
 
         with mock.patch.object(helper, "_run_osascript", side_effect=fake_run):
             helper.action_send(
-                {"to": "+14155551234", "text": "body via tempfile 🎉"},
+                {"to": "+14155551234", "text": "body via tempfile 🎉",
+                 "send_nonce": _mint("+14155551234", "body via tempfile 🎉")},
                 None, self.contacts, self.blocklist,
             )
 
@@ -287,7 +339,8 @@ class SendActionTests(unittest.TestCase):
         with mock.patch.object(helper, "_run_osascript", side_effect=fake_run):
             with self.assertRaises(RuntimeError) as ctx:
                 helper.action_send(
-                    {"to": "+14155551234", "text": "x"},
+                    {"to": "+14155551234", "text": "x",
+                     "send_nonce": _mint("+14155551234", "x")},
                     None, self.contacts, self.blocklist,
                 )
 
@@ -338,6 +391,84 @@ class SendActionsDeclareNoDBTests(unittest.TestCase):
     def test_review_still_needs_db(self):
         # Regression: don't accidentally mark read actions as no-db.
         self.assertTrue(getattr(helper.action_review, "needs_db", True))
+
+
+class SendGateIntegrationTests(_BridgeDirMixin, unittest.TestCase):
+    """action_send must refuse anything that fails the preview/confirm
+    gate — missing nonce, stale nonce, or a body that doesn't match what
+    was previewed. osascript is mocked so we can assert it is NEVER
+    called on these failure paths."""
+
+    def setUp(self):
+        super().setUp()
+        self.contacts = {"4155551234": "Alice Example"}
+        self.blocklist = ["+18005551212"]
+
+    def _try_send(self, params):
+        with mock.patch.object(helper, "_run_osascript") as mocked:
+            try:
+                helper.action_send(params, None, self.contacts, self.blocklist)
+                raised = None
+            except Exception as e:
+                raised = e
+        return raised, mocked
+
+    def test_send_without_nonce_refused(self):
+        raised, mocked = self._try_send(
+            {"to": "+14155551234", "text": "hi"},
+        )
+        self.assertIsInstance(raised, send_gate.SendGateError)
+        self.assertIn("missing nonce", str(raised))
+        mocked.assert_not_called()
+
+    def test_send_with_bogus_nonce_refused(self):
+        raised, mocked = self._try_send(
+            {"to": "+14155551234", "text": "hi",
+             "send_nonce": "abcDEF_-123"},  # well-formed but never minted
+        )
+        self.assertIsInstance(raised, send_gate.SendGateError)
+        self.assertIn("not recognized", str(raised))
+        mocked.assert_not_called()
+
+    def test_payload_swap_between_preview_and_send_refused(self):
+        # Mint a nonce for "hi", then try to send "BAD" with it.
+        nonce = _mint("+14155551234", "hi")
+        raised, mocked = self._try_send(
+            {"to": "+14155551234", "text": "BAD",
+             "send_nonce": nonce},
+        )
+        self.assertIsInstance(raised, send_gate.SendGateError)
+        self.assertIn("differs from preview", str(raised))
+        mocked.assert_not_called()
+
+    def test_nonce_is_single_use(self):
+        # First send consumes the nonce; second send with same nonce fails.
+        nonce = _mint("+14155551234", "hi")
+        with mock.patch.object(helper, "_run_osascript", return_value=(0, "", "")):
+            helper.action_send(
+                {"to": "+14155551234", "text": "hi", "send_nonce": nonce},
+                None, self.contacts, self.blocklist,
+            )
+        raised, mocked = self._try_send(
+            {"to": "+14155551234", "text": "hi", "send_nonce": nonce},
+        )
+        self.assertIsInstance(raised, send_gate.SendGateError)
+        self.assertIn("not recognized", str(raised))
+        mocked.assert_not_called()
+
+    def test_preview_and_send_round_trip(self):
+        # End-to-end: preview returns a nonce, send with that nonce works.
+        preview = helper.action_send_preview(
+            {"to": "+14155551234", "text": "hello"},
+            None, self.contacts, self.blocklist,
+        )
+        nonce = preview["send_nonce"]
+        with mock.patch.object(helper, "_run_osascript", return_value=(0, "", "")):
+            result = helper.action_send(
+                {"to": "+14155551234", "text": "hello", "send_nonce": nonce},
+                None, self.contacts, self.blocklist,
+            )
+        self.assertIn("sent", result)
 
 
 if __name__ == "__main__":
