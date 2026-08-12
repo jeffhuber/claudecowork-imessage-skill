@@ -18,7 +18,7 @@ Read, search, and analyze your iMessages on macOS from inside Claude Cowork.
 
 ## What it does
 
-Seven helper actions. All take a short JSON request and return a JSON
+Eight helper actions. All take a short JSON request and return a JSON
 response via the bridge folder. Claude picks the right one from plain
 English — you generally don't need to know the action names.
 
@@ -31,6 +31,7 @@ English — you generally don't need to know the action names.
 | `contacts_lookup` | *"Look up contacts named 'Smith'."* | Disambiguates by name. Useful before `chat_history` on an ambiguous name. |
 | `send_preview` | *(used implicitly by the skill before every send)* | Dry-run of a `send` — validates recipient + body, resolves the contact name, flags blocklisted threads. No osascript call, no chat.db read. |
 | `send` | *"Text +14155551234: 'Confirmed for Thursday at 3pm.'"* | Actually delivers the message via AppleScript (`tell application "Messages"`). Always preceded by `send_preview` and explicit user approval. |
+| `status` | *"Check whether my iMessage helper is healthy."* | Reports helper/protocol versions and local installation checks without reading messages. |
 
 **Chained workflows** Claude handles naturally because the read + send
 actions share a bridge:
@@ -46,8 +47,8 @@ actions share a bridge:
   or inbound — text fields only).
 - No editing or deleting previously sent messages.
 - No message effects (balloons, confetti, invisible ink).
-- No group-chat creation. Can send *to* an existing group-chat ID, but
-  not stand one up.
+- No group-chat sending or creation. Outbound recipients must be an
+  individual phone number or email address.
 - Only reads your local `chat.db` — if a thread hasn't synced to this
   Mac, it won't appear in search / review.
 
@@ -68,11 +69,10 @@ response back into the same folder — where Claude can then read it.
   reads response.json  <-----------------/
 ```
 
-Sending iMessages runs through the **same** bridge: Claude writes a `send`
-request, the helper shells out to `/usr/bin/osascript` with a short
-AppleScript that tells Messages.app to send the message via iMessage or SMS.
-No GUI automation. One subprocess, typically under a second end to end. See
-[Sending below](#sending).
+Sending iMessages runs through the **same** bridge. After a payload-bound nonce
+check, the helper opens a native macOS confirmation window showing the exact
+recipient and complete body. Cancel is the keyboard default. Only an explicit
+Send click permits the helper to invoke `/usr/bin/osascript`.
 
 The helper uses the host-specific LaunchAgent
 `com.jeffhuber.claudecowork-imessage`, so it can run alongside the sibling
@@ -81,43 +81,82 @@ responses, policies, logs, and nonces.
 
 ## Install
 
-### The fast path — from a release
+### 1. Install the plugin
 
-1. Go to the [Releases page](../../releases/latest) and download
-   `imessage-review.plugin`.
-2. In Cowork, drag the `.plugin` file into the app (or use "Install
-   plugin" and point it at the file).
-3. Pick a **bridge folder** — any directory on your Mac that Cowork can
-   write to. Example: `~/Documents/imessage-bridge`. Select it as your
-   Cowork workspace.
-4. Ask Claude "set up the iMessage helper for this folder." Claude will
-   copy the installer assets into the folder and run `install.sh` for
-   you. (Or do it manually — `cd <bridge folder> && ./install.sh`.)
-5. `install.sh` will print the exact path of the compiled wrapper binary
-   and tell you to grant Full Disk Access. Open
-   System Settings → Privacy & Security → Full Disk Access → **+** →
-   paste the path → toggle on.
-6. Verify: ask Claude to "triage my iMessages from the last day" or run
-   `/imessage-review:imessages 1`.
+Download `imessage-review.plugin` and `SHA256SUMS` from the
+[latest release](../../releases/latest), verify the checksum, then install the
+plugin in Claude Cowork. Release archives contain source only; the macOS
+binaries are compiled and signed locally.
 
-### The source path — build it yourself
+To build the plugin from source:
 
 ```
 git clone https://github.com/jeffhuber/claudecowork-imessage-skill.git
 cd claudecowork-imessage-skill
-zip -r imessage-review.plugin . -x "*.DS_Store" "__pycache__/*" "*/__pycache__/*" ".git/*"
+zip -r imessage-review.plugin . -x "*.DS_Store" "__pycache__/*" \
+  "*/__pycache__/*" ".git/*"
 ```
 
-Then drag `imessage-review.plugin` into Cowork and continue with steps 3–6
-above.
+### 2. Select a bridge
+
+Pick a dedicated folder Claude Cowork can access, such as
+`~/Documents/claude-imessage-bridge`. Ask Claude to bootstrap this plugin's
+helper assets into that folder, or run the bundled script directly:
+
+```bash
+"<installed-plugin-assets>/skills/imessage-review/bootstrap.sh" \
+  "$HOME/Documents/claude-imessage-bridge"
+cd "$HOME/Documents/claude-imessage-bridge"
+```
+
+Never point Claude and Grok at the same bridge. Their LaunchAgents and binaries
+are host-specific, and their requests, responses, policies, logs, and nonces
+must remain independent.
+
+### 3. Choose an installation mode
+
+**Hardened install (recommended):**
+
+```bash
+./install-hardened.sh
+```
+
+This invokes `sudo` narrowly to install trusted code under
+`/Library/Application Support/ClaudeCoworkIMessage/users/<uid>/libexec`.
+The selected bridge remains user-owned so Cowork can use it. Reads are
+default-deny through a root-owned allowlist:
+
+```bash
+CODE_ROOT="/Library/Application Support/ClaudeCoworkIMessage/users/$UID/libexec"
+python3 "$CODE_ROOT/tools/configure_allowlist.py" add +15551234567
+```
+
+**Standard per-user install:**
+
+```bash
+./install.sh
+```
+
+This requires no administrator access and defaults to a user-editable
+blocklist. Code in the bridge is writable by processes running as your user,
+so this mode does not resist a compromised same-user process.
+
+Both modes compile the wrapper and native confirmation helper locally, create
+private runtime directories, install
+`com.jeffhuber.claudecowork-imessage`, and print the exact wrapper path that
+must receive Full Disk Access.
+
+### 4. Grant permissions and verify
+
+Grant Full Disk Access to the exact wrapper printed by the installer. The first
+approved send separately prompts for Automation access to Messages. Then run
+the printed `doctor.py` command and follow [the smoke test](docs/SMOKE_TEST.md).
 
 ## Sending
 
-As of v0.3.0, sending is a **first-class helper action** — no Computer Use,
-no GUI automation. Claude writes a `send` request into the bridge folder,
-the helper shells out to `/usr/bin/osascript` with a short AppleScript
-that tells Messages.app to deliver the message. Typical round-trip is
-under a second.
+Sending is a first-class helper action, with no Computer Use or automated GUI
+clicks. The helper invokes AppleScript only after both its nonce gate and a
+native, fail-closed confirmation window approve the exact payload.
 
 ### How to use it
 
@@ -130,14 +169,16 @@ Claude will:
 1. Run a `send_preview` to show you the resolved recipient, service
    (iMessage vs. SMS), and full text.
 2. **Wait for your explicit OK.** Nothing sends until you confirm.
-3. Run `send`. The helper writes your text to a UTF-8 tempfile, invokes
-   `osascript`, and deletes the tempfile whether the send succeeds or
-   fails.
+3. Run `send`. A native macOS window shows the exact phone/email, service, and
+   full body. Cancel is the Return-key default and a timeout cancels the send.
+4. Deliberately click **Send**. The helper invokes `osascript` and removes its
+   UTF-8 body tempfile whether delivery succeeds or fails.
 
 ### One-time permission: Automation → Messages
 
-On the first send, macOS shows an Automation prompt — *"cowork-imessage-
-helper wants to control Messages"*. Click **OK**. After that, the grant
+On the first send, macOS shows an Automation prompt:
+*"claude-cowork-imessage-helper wants to control Messages"*. Click **OK**.
+After that, the grant
 lives under:
 
   System Settings → Privacy & Security → Automation →
@@ -149,13 +190,14 @@ AppleScript.
 
 ### What gets validated before osascript even runs
 
-- Recipient is a phone number / email / group-chat ID (up to 200 chars).
+- Recipient is an individual phone number or conservative ASCII email address.
+  Names and every `chat...` group identifier are rejected.
 - Text is 1–4000 UTF-8 characters with no C0 control bytes other than
   `\n`, `\r`, `\t`.
 - Service is `iMessage`, `SMS`, or unset (defaults to iMessage).
 - Recipient is **not** on `contacts/blocked_chats.txt` — blocklist still
   applies to outbound as well as inbound.
-- **(v0.4.0+)** A fresh, payload-bound `send_nonce` minted by a prior
+- A fresh, payload-bound `send_nonce` minted by a prior
   `send_preview` within the last 60 seconds is present on the `send`
   request. The helper refuses sends without one, sends whose body has
   been changed after preview, and sends that replay a used nonce. This
@@ -167,8 +209,7 @@ AppleScript.
 - Attachments / images / stickers / replies-to-specific-message — AppleScript
   exposes a simple `send <text> to <buddy>` shape. Plain text only.
 - Message effects (balloon, confetti, etc.).
-- Group-chat creation. You can send *to* an existing group-chat ID, not
-  stand up a new one.
+- Group-chat sending or creation.
 
 ## Requirements
 
@@ -176,8 +217,17 @@ AppleScript.
   osascript).
 - Xcode Command Line Tools (`xcode-select --install`) — for `clang` and
   `codesign` during install.
-- Python 3 (uses `/usr/bin/python3` if available, otherwise `$PATH`).
+- Python 3.9 or newer (uses `/usr/bin/python3` if available).
 - `/usr/bin/osascript` — ships with macOS, used for sending.
+
+### Compatibility
+
+| Component | Supported and verified | Notes |
+|---|---|---|
+| macOS | 13+; CI on `macos-latest` | Messages SQLite and AppleScript are undocumented or legacy integration surfaces and can change. |
+| Python | 3.9, 3.11, and 3.13 in CI | The installers require 3.9+. |
+| Native build | Apple Clang on `macos-latest` | Binaries are compiled from source on the target Mac. |
+| Claude | Claude Cowork plugin bundle | Cowork must be able to access the selected bridge folder. |
 
 ## Privacy
 
@@ -197,6 +247,15 @@ You can block entire threads from ever entering Claude's context by adding
 them to `<bridge folder>/contacts/blocked_chats.txt` (phone numbers,
 emails, or group-chat IDs — one per line). Blocked threads are dropped
 before the redactor even runs.
+
+### Read policy
+
+The hardened install enforces a root-owned, default-deny allowlist. Only listed
+phone numbers, emails, and group identifiers can appear in message or contact
+responses. A same-user process cannot broaden that policy without administrator
+approval. The standard install uses `contacts/read_policy.txt` (`blocklist` by
+default); it can be changed to `allowlist`, but that policy remains user-editable.
+The blocklist always takes precedence in either mode.
 
 ### Consent — the thing nobody else on the thread agreed to
 
@@ -258,9 +317,11 @@ path. That means:
 
 - Re-running the installer against a **bit-identical** source rebuilds the
   same CDHash and the grant carries over.
-- Changing the C source, the Python, or even a compiler version *can*
-  produce a different CDHash, at which point macOS will silently drop
-  requests until you re-grant FDA to the new binary.
+- Changing the wrapper source, its baked paths, compiler output, or signing
+  identity can produce a different CDHash, at which point macOS may require a
+  fresh grant. Editing `helper.py` alone does not change the wrapper's CDHash;
+  this is why hardened mode installs Python under a root-owned path and why the
+  wrapper validates every loaded component before execution.
 - macOS can also invalidate the grant on its own — major OS upgrades,
   Spotlight reindex weirdness, or TCC resets have all been reported.
 
@@ -292,45 +353,32 @@ short AppleScript `tell application "Messages"` block. That means:
 - The first send triggers a macOS Automation prompt — you have to click
   **OK** to let the helper control Messages.app. The grant lives under
   System Settings → Privacy & Security → Automation.
-- AppleScript will happily send to a `buddy` handle that doesn't have
-  iMessage coverage; the helper does minimal validation beyond
-  "is-it-a-string". If you send to a number that can't receive iMessage
-  and you picked `service: iMessage`, the osascript call errors out and
-  nothing is delivered — switch to `service: SMS`.
+- The helper accepts only individual phone numbers and conservative ASCII email
+  addresses. It cannot determine in advance whether that handle is reachable on
+  the selected service; an unreachable iMessage handle causes AppleScript to
+  fail without sending.
 - There's no "sent successfully to the network" confirmation. The helper
   only confirms that osascript returned 0. If the recipient blocks you or
   the network is down, iMessage will show the red ! bubble in
   Messages.app, but the helper won't know.
 
-The tradeoff vs. the previous Computer-Use path is speed (sub-second vs.
-5–15s), reliability (no pixel races), and the same "preview + explicit
-user approval before the send request" safety model baked into the skill
-instructions — now enforced helper-side (v0.4.0+) via a single-use nonce,
-so the preview step can't be skipped even by a compromised client.
+The tradeoff vs. the previous Computer-Use path is speed and reliability. The
+current safety model is enforced in code: a single-use payload-bound nonce plus
+an independent native confirmation dialog showing the complete message.
 
 ## Changelog
 
-- **v0.4.0** — **Helper-side send gate.** `send_preview` now mints a
-  single-use, payload-bound `send_nonce` (60 s TTL). `send` must echo
-  it back and carry an identical `to`/`text`/`service`; otherwise the
-  helper refuses. Replay, stale, missing, and payload-swap attempts are
-  all rejected. Preview/confirm is now enforced on the helper, not in
-  the skill prompt. Zero install-UX change. No helper rebuild needed on
-  upgrade (the C wrapper's CDHash is unchanged — FDA and Automation
-  grants are preserved).
-- **v0.3.0** — Sending is a first-class helper action via AppleScript
-  + `osascript`. Removed Computer-Use dependency for sends. `send` and
-  `send_preview` actions added; recipient / body validation, tempfile
-  body handling, and outbound blocklist enforcement.
-- **v0.2.0** — Read-side hardening: blocklist, redaction, `attributedBody`
-  decoder, read actions (`review` / `search` / `chat_history` /
-  `response_stats` / `contacts_lookup`).
+See [CHANGELOG.md](CHANGELOG.md). Version 1.1 aligns the Claude helper with the
+Grok sibling: independent identities, native send confirmation, no-follow
+runtime paths, consistent SQLite snapshots, diagnostics, and the optional
+root-owned/default-deny trust model.
 
 ## Uninstall
 
-Run `./uninstall.sh` from the bridge folder. This removes the launchd
-agent. Files and the Full Disk Access grant are left in place — remove
-those manually if you want a full teardown.
+Run `./uninstall-hardened.sh` for a hardened install or `./uninstall.sh` for a
+standard install. Both remove only Claude's LaunchAgent and preserve runtime
+data until you deliberately delete it. Revoke `claude-cowork-imessage-helper`
+under Full Disk Access and Automation for a complete teardown.
 
 ## Upgrading from the legacy LaunchAgent
 
@@ -343,13 +391,16 @@ Access and Automation approval once more.
 
 ## Development
 
-```
+```bash
 python3 -m unittest discover -s tests -v
+python3 tools/check_version.py v1.1.0
+bash -n skills/imessage-review/*.sh
+shellcheck skills/imessage-review/*.sh
 ```
 
-Tests cover the attributedBody decoder, the redaction regexes (plus the
-documented known-bypass cases), and request-parameter validation. See
-`tests/README.md` for details.
+CI also compiles the C and Objective-C helpers with warnings as errors, lints
+the LaunchAgent plist, and tests Python 3.9, 3.11, and 3.13. See
+`tests/README.md` for coverage details.
 
 ## License
 

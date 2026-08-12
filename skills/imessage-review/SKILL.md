@@ -8,7 +8,7 @@ description: >
   iMessage. macOS only — uses an on-device launchd helper to query the
   Messages SQLite database, and AppleScript (osascript) via the same helper
   to send outbound messages.
-version: 0.4.0
+version: 1.1.0
 ---
 
 # iMessage on macOS — Cowork-native
@@ -43,21 +43,24 @@ Access, the wrapper execs `helper.py`, and helper writes the JSON response
 back into the same folder where Claude can read it.
 
 Sending goes through the **same** request/response bridge. Claude writes a
-`send_preview` or `send` request, the helper calls `osascript` to drive
-Messages.app via AppleScript, and the result comes back as JSON. No GUI
-automation, no Computer Use clicks — just a short-lived subprocess.
+`send_preview` or `send` request. After nonce validation, the helper opens a
+native macOS confirmation window showing the exact recipient and complete body;
+Cancel is the keyboard default. Only an explicit Send click permits the helper
+to call `osascript`.
 
 ## Prerequisites — one-time setup
 
 This plugin ships the helper source and install scripts bundled inside the
 skill directory (alongside this `SKILL.md`):
 
-- `install.sh` / `uninstall.sh`
+- `install.sh` / `uninstall.sh` (standard mode)
+- `install-hardened.sh` / `uninstall-hardened.sh` (recommended mode)
 - `bootstrap.sh`
 - `com.jeffhuber.claudecowork-imessage.plist.template`
 - `bin/cowork_imessage_helper.c` (wrapper source)
 - `bin/helper.py` (Python worker)
 - `bin/send_gate.py` (send gate)
+- `bin/confirm_imessage_send.m` (native confirmation source)
 
 The user runs a one-time install into the Cowork folder they want to use as
 the request/response bridge. Order of operations the first time a user asks
@@ -65,8 +68,7 @@ Claude to read iMessages:
 
 1. Verify the user has selected a Cowork folder. If not, tell them to pick
    one (it will hold `control/` and `bin/`). Call it the "bridge folder".
-2. Check whether `<bridge folder>/bin/claude-cowork-imessage-helper` exists. If
-   missing, the helper isn't installed. Guide the user through these steps:
+2. Guide the user through these steps:
 
    a. Run the bundled bootstrap script with the selected bridge folder. Use
       the script's actual path supplied by the installed plugin; do not derive
@@ -77,30 +79,49 @@ Claude to read iMessages:
         "<bridge folder>"
       ```
 
-   b. In Terminal: `cd <bridge folder> && chmod +x install.sh && ./install.sh`
-   c. When install.sh prints FDA instructions, guide the user through:
-      System Settings → Privacy & Security → Full Disk Access → + →
-      paste the path printed (e.g. `<bridge folder>/bin/claude-cowork-imessage-helper`).
+   b. In Terminal, choose the hardened install unless the user explicitly wants
+      a no-sudo, same-user trust model:
 
-3. Verify: `<bridge folder>/control/{requests,responses}/` and `log.txt`
-   exist, and `~/Library/LaunchAgents/com.jeffhuber.claudecowork-imessage.plist`
-   exists.
+      ```bash
+      cd "<bridge folder>" && ./install-hardened.sh
+      # Alternative: ./install.sh
+      ```
+
+   c. When the installer prints FDA instructions, guide the user through:
+      System Settings → Privacy & Security → Full Disk Access → + →
+      paste the exact wrapper path printed.
+
+3. Run the `doctor.py` command printed by the installer. Also verify
+   `<bridge folder>/control/{requests,responses}/`, `log.txt`, and
+   `~/Library/LaunchAgents/com.jeffhuber.claudecowork-imessage.plist` exist.
 
 If any verification fails, tell the user exactly which step broke and show
 the relevant line from `control/log.txt`.
 
 ## Invoking the helper (read/analyze actions)
 
-Write a JSON file to `<bridge folder>/control/requests/request-<id>.json`.
+Write complete JSON to a hidden temporary file in
+`<bridge folder>/control/requests/`, then atomically rename it to
+`request-<id>.json`. Never write directly to the final name: launchd may fire
+while a direct write is incomplete.
 launchd will fire the helper within ~1 second (WatchPaths has a 1s
 ThrottleInterval). Then poll
 `<bridge folder>/control/responses/response-<id>.json` until it appears —
 typically 2–5s total including the chat.db copy.
 
 Use a UUID or timestamp for `<id>`. Always set `id` inside the request body
-to the same string.
+to the same string. Delete each response immediately after parsing it.
 
 Whitelisted actions (anything else is rejected):
+
+### `status` — compatibility and installation checks
+
+```json
+{"id": "abc", "action": "status", "params": {}}
+```
+
+Call this before the first message operation. Require protocol major version
+`1`; fail closed with upgrade guidance on a future major mismatch.
 
 ### `review` — triage recent messages
 
@@ -187,9 +208,9 @@ The `send_nonce` is the one returned by the preceding `send_preview`. The
 them and you'll need to `send_preview` again.
 
 The helper writes `text` to a temporary UTF-8 file, shells out to
-`/usr/bin/osascript` with a short AppleScript that reads the file and tells
-Messages.app to send it to the addressed buddy on the requested service
-(`iMessage` or `SMS`). The tempfile is always removed, even on failure.
+`/usr/bin/osascript` only after a native confirmation window shows the exact
+phone/email, service, and complete body. The tempfile is always removed, even
+on failure or cancellation.
 
 Response on success includes `sent: {to, resolved_name, service,
 text_length, sent_at}`. On failure, the helper returns an error. Typical
@@ -199,6 +220,8 @@ send-gate error (`"send gate: ..."` / `"missing nonce; call send_preview
 first"` / `"send payload differs from preview"`).
 
 **Refusal rules baked into the helper** — no way for Claude to override:
+- Recipient must be an individual phone number or conservative ASCII email.
+  Names and all `chat...` group identifiers are rejected.
 - Text must be 1–4000 chars and contain no C0 control characters other
   than `\n`, `\r`, `\t`.
 - `service` must be `"iMessage"`, `"SMS"`, or omitted (defaults to iMessage).
@@ -219,16 +242,22 @@ import json, uuid, time, pathlib
 
 root = pathlib.Path("<bridge folder>")
 req_id = uuid.uuid4().hex[:12]
-(root / "control" / "requests" / f"request-{req_id}.json").write_text(
+tmp = root / "control" / "requests" / f".request-{req_id}.json.tmp"
+final = root / "control" / "requests" / f"request-{req_id}.json"
+tmp.write_text(
     json.dumps({"id": req_id, "action": "review", "params": {"days": 2}})
 )
+tmp.replace(final)
 
 resp = root / "control" / "responses" / f"response-{req_id}.json"
 for _ in range(30):
     if resp.exists():
         break
     time.sleep(0.5)
-data = json.loads(resp.read_text())
+try:
+    data = json.loads(resp.read_text())
+finally:
+    resp.unlink(missing_ok=True)
 ```
 
 ## Sending messages
@@ -252,8 +281,10 @@ under a second on average.
 4. Issue the `send` request with the **same** `to`/`text`/`service` and the
    `send_nonce` from step 2. If user approval takes longer than
    `send_nonce_ttl_seconds` (default 60), re-run `send_preview` to mint a
-   fresh nonce. Surface `sent.sent_at` and the resolved name back to the
-   user as confirmation.
+   fresh nonce.
+5. Tell the user to inspect the independent native macOS dialog and click Send
+   only if its exact recipient and complete body are expected. Never automate
+   or bypass this click. Surface `sent.sent_at` only after success.
 
 ### Why the helper instead of computer-use?
 
@@ -294,7 +325,7 @@ to be removed and re-added (same as Full Disk Access).
   from a prior `review` response.
 - **Messages still decoding as empty.** The `attributedBody` parser is
   heuristic. If a thread's messages come back blank, check `log.txt` —
-  the helper logs the first 64 bytes of each unparseable blob.
+  the helper logs only failure metadata and byte counts, never raw blob bytes.
 - **Wrong folder selected.** If the user selects a different Cowork folder
   after installing, launchd is still watching the original bridge folder.
   Re-run `install.sh` from the new folder to point launchd at it.
@@ -318,11 +349,16 @@ threads here.
 |------|------|
 | `SKILL.md` | This file. |
 | `install.sh` | One-time setup: builds + signs wrapper, installs plist, bootstraps launchd. |
+| `install-hardened.sh` | Recommended setup: root-owned code and default-deny read allowlist. |
 | `uninstall.sh` | Removes the launchd agent. Leaves files + FDA grant. |
+| `uninstall-hardened.sh` | Removes only Claude's root-owned helper and LaunchAgent. |
 | `com.jeffhuber.claudecowork-imessage.plist.template` | launchd agent template. Filled in by `install.sh` and copied to `~/Library/LaunchAgents/`. |
 | `bin/cowork_imessage_helper.c` | Tiny hardened wrapper. FDA is granted to this. Ignores argv, sanitizes environment, execs helper.py. |
 | `bin/helper.py` | Python helper. Scans `control/requests/`, dispatches actions, writes `control/responses/response-*.json`. |
 | `bin/send_gate.py` | Helper-side preview/confirm gate. Mints single-use nonces on `send_preview`, consumes them on `send`. Persists under `<bridge>/nonces/`. (v0.4.0+) |
+| `bin/confirm_imessage_send.m` | Native, fail-closed send confirmation UI. |
+| `tools/doctor.py` | Non-destructive install and permission diagnostics. |
+| `tools/configure_allowlist.py` | Narrow sudo-backed hardened policy editor. |
 
 ## Files created at the user's bridge folder (after install)
 
@@ -331,6 +367,6 @@ threads here.
 | `contacts/blocked_chats.txt` | User-maintained blocklist of sensitive chats. |
 | `control/requests/` | Agent writes request JSON here. Watched by launchd. |
 | `control/responses/` | Helper writes response JSON here. Agent reads. |
-| `control/log.txt` | Helper stderr + logging. First place to check when debugging. |
-| `bin/claude-cowork-imessage-helper` | Compiled, ad-hoc signed wrapper (the FDA target). |
+| `control/log.txt` | Private, rotating helper diagnostics. No message bodies. |
+| `bin/claude-cowork-imessage-helper` | Standard-mode wrapper. Hardened mode stores it under the root-owned code root. |
 | `nonces/` | Short-lived per-nonce files bound to previewed sends. Created on first preview; TTL-reaped on every helper run. (v0.4.0+) |
