@@ -1,20 +1,37 @@
 # imessage-review
 
-Read, search, and analyze your iMessages on macOS from inside Claude Cowork.
+Read, search, and analyze your iMessages on macOS from AI assistants.
+
+**Dual-host support:** This repository provides iMessage integration for both **Claude Cowork** and **Grok Bot**, sharing a single macOS helper.
 
 ## What's in the box
 
-- **Skill** `imessage-review` — teaches Claude the full protocol for reading
-  and sending iMessages via an on-device helper. Triggers on natural
-  language like *"show me iMessages from X"*, *"triage my unread
-  messages"*, *"average reply time to Y"*, *"text Alice: see you at 3"*.
-- **Command** `/imessage-review:imessages [days]` — one-shot triage of the
-  last N days (default 2). Categorizes threads into needs-reply /
-  low-priority / skipped.
-- **Bundled helper** — source for a tiny hardened C wrapper that holds the
-  Full Disk Access grant, plus the Python worker that reads `chat.db`,
+- **Shared macOS helper** — source for a tiny hardened C wrapper that holds
+  the Full Disk Access grant, plus the Python worker that reads `chat.db`,
   resolves contacts, redacts sensitive content, drives `osascript` for
-  outbound sends, and writes JSON responses.
+  outbound sends, and writes JSON responses. One install, works for both hosts.
+- **Claude Cowork plugin** — `.plugin` bundle with skill, command palette
+  integration (`/imessage-review:imessages [days]`), and installer assets.
+  Triggers on natural language like *"show me iMessages from X"*, *"triage
+  my unread messages"*, *"average reply time to Y"*, *"text Alice: see you at 3"*.
+- **Grok Bot skill** — Markdown skill file that teaches Grok Bot the same
+  protocol. Uses shell commands on the user's Mac to write request files
+  and poll for responses.
+
+## Choose your host
+
+This repository supports **two AI hosts** with one shared macOS helper:
+
+| Host | Installation Guide | What You Get |
+|------|-------------------|--------------|
+| **Claude Cowork** | [hosts/cowork/README.md](hosts/cowork/README.md) | Plugin-based install, `.plugin` bundle, command palette integration, auto workspace bridging |
+| **Grok Bot** | [hosts/grok-bot/README.md](hosts/grok-bot/README.md) | Skill Markdown file, manual bridge folder setup, shell-based request/response |
+
+Both hosts use the **same helper** (`install.sh` + `bin/cowork-imessage-helper`) and the **same protocol** (`docs/PROTOCOL.md`). Pick the host that matches your workflow, install the helper once, and you're set.
+
+If you're unsure which host to choose:
+- **Use Cowork** if you want plugin packaging, command shortcuts, and automatic workspace integration.
+- **Use Grok Bot** if you prefer direct shell access and explicit control over the bridge folder location.
 
 ## What it does
 
@@ -40,7 +57,7 @@ actions share a bridge:
 - *"Who has the slowest reply time from me this week? Top 5 with stats."*
 - *"Text Angel back with a thumbs-up and propose Thursday at 2pm instead."*
 
-**What the plugin won't do:**
+**What the helper won't do:**
 
 - No attachments, images, stickers, audio, or Tapback reactions (outbound
   or inbound — text fields only).
@@ -53,74 +70,52 @@ actions share a bridge:
 
 ## How it works
 
-The Cowork agent runs in a Linux sandbox that can't see `~/Library/Messages`.
-This plugin installs a `launchd` agent on your Mac that watches for JSON
-request files in a *bridge folder* (any folder you select as your Cowork
-workspace). When Claude writes a request file, launchd fires the helper,
-which reads the Messages database, processes the request, and writes a JSON
-response back into the same folder — where Claude can then read it.
+AI assistants (Cowork's Linux sandbox, Grok Bot's remote environment) can't
+directly read `~/Library/Messages/chat.db` on your Mac. This project installs
+a `launchd` agent on your Mac that watches for JSON request files in a
+**bridge folder** (any folder you designate). When the AI host writes a
+request file, launchd fires the helper, which reads the Messages database,
+processes the request, and writes a JSON response back into the same folder—
+where the AI host can then read it.
 
 ```
-  Cowork (Linux sandbox)                 Your Mac
-  ----------------------                 --------
+  AI Host (sandboxed/remote)             Your Mac
+  --------------------------             --------
   writes request.json  -->  launchd  -->  helper reads chat.db
                                           writes response.json
   reads response.json  <-----------------/
 ```
 
-Sending iMessages runs through the **same** bridge: Claude writes a `send`
-request, the helper shells out to `/usr/bin/osascript` with a short
+Sending iMessages runs through the **same** bridge: the AI host writes a
+`send` request, the helper shells out to `/usr/bin/osascript` with a short
 AppleScript that tells Messages.app to send the message via iMessage or SMS.
 No GUI automation. One subprocess, typically under a second end to end. See
 [Sending below](#sending).
 
 ## Install
 
-### The fast path — from a release
+Installation steps depend on your AI host. Follow the guide for your chosen platform:
 
-1. Go to the [Releases page](../../releases/latest) and download
-   `imessage-review.plugin`.
-2. In Cowork, drag the `.plugin` file into the app (or use "Install
-   plugin" and point it at the file).
-3. Pick a **bridge folder** — any directory on your Mac that Cowork can
-   write to. Example: `~/Documents/imessage-bridge`. Select it as your
-   Cowork workspace.
-4. Ask Claude "set up the iMessage helper for this folder." Claude will
-   copy the installer assets into the folder and run `install.sh` for
-   you. (Or do it manually — `cd <bridge folder> && ./install.sh`.)
-5. `install.sh` will print the exact path of the compiled wrapper binary
-   and tell you to grant Full Disk Access. Open
-   System Settings → Privacy & Security → Full Disk Access → **+** →
-   paste the path → toggle on.
-6. Verify: ask Claude to "triage my iMessages from the last day" or run
-   `/imessage-review:imessages 1`.
+- **Claude Cowork:** [hosts/cowork/README.md](hosts/cowork/README.md) — Plugin-based install from a release or source
+- **Grok Bot:** [hosts/grok-bot/README.md](hosts/grok-bot/README.md) — Manual helper install + skill enablement
 
-### The source path — build it yourself
-
-```
-git clone https://github.com/jeffhuber/claudecowork-imessage-skill.git
-cd claudecowork-imessage-skill
-zip -r imessage-review.plugin . -x "*.DS_Store" "__pycache__/*" "*/__pycache__/*" ".git/*"
-```
-
-Then drag `imessage-review.plugin` into Cowork and continue with steps 3–6
-above.
+Both paths install the **same helper** (`install.sh` + `bin/cowork-imessage-helper`) and require the **same macOS permissions** (Full Disk Access + Automation for Messages). The difference is how you enable the skill in your AI host and where you designate the bridge folder.
 
 ## Sending
 
 As of v0.3.0, sending is a **first-class helper action** — no Computer Use,
-no GUI automation. Claude writes a `send` request into the bridge folder,
+no GUI automation. The AI host writes a `send` request into the bridge folder,
 the helper shells out to `/usr/bin/osascript` with a short AppleScript
 that tells Messages.app to deliver the message. Typical round-trip is
 under a second.
 
 ### How to use it
 
-Just ask Claude in plain English:
+Just ask your AI assistant in plain English:
 
 > "Text +14155551234: 'Confirmed for Thursday at 3pm.'"
 
-Claude will:
+The assistant will:
 
 1. Run a `send_preview` to show you the resolved recipient, service
    (iMessage vs. SMS), and full text.
@@ -195,15 +190,15 @@ before the redactor even runs.
 
 ### Consent — the thing nobody else on the thread agreed to
 
-When you use this plugin, you're piping both sides of your conversations —
-including messages you received from other people — into a commercial LLM
-(Claude). Those people didn't consent to that, and in many cases they'd
-reasonably object if they knew. This is an unavoidable property of any
-"read my messages" tool, but it's worth sitting with before you run this
-every morning as a habit.
+When you use this helper, you're piping both sides of your conversations —
+including messages you received from other people — into a commercial AI
+assistant (Claude, Grok, etc.). Those people didn't consent to that, and in
+many cases they'd reasonably object if they knew. This is an unavoidable
+property of any "read my messages" tool, but it's worth sitting with before
+you run this every morning as a habit.
 
 **Strongly consider preemptively blocklisting** any thread that contains
-messages you would not want an LLM to read, including:
+messages you would not want an AI to read, including:
 
 - Therapists, counselors, clergy, medical providers
 - Attorneys and anyone else you have privileged communication with
@@ -216,7 +211,8 @@ messages you would not want an LLM to read, including:
   running their messages through a third party might be an issue
 
 Adding a chat to `contacts/blocked_chats.txt` is a one-line operation and
-is enforced *before* redaction — those messages never reach Claude at all.
+is enforced *before* redaction — those messages never reach your AI assistant
+at all.
 
 ## Known limitations
 
@@ -264,12 +260,13 @@ the bridge folder. **Fix:** re-open System Settings → Privacy & Security
 → Full Disk Access, remove the old entry, re-add the binary at the path
 the installer prints.
 
-### Privacy tradeoff: messages flow through a commercial LLM
+### Privacy tradeoff: messages flow through a commercial AI service
 
 This is not a local LLM pipeline. Every thread you surface flows through
-Anthropic's API as part of the Claude context window and is subject to
-Anthropic's data handling and retention policies, not yours. If that's not
-acceptable for a specific conversation, blocklist it (see above).
+your AI provider's API (Anthropic for Claude, xAI for Grok, etc.) as part
+of the context window and is subject to that provider's data handling and
+retention policies, not yours. If that's not acceptable for a specific
+conversation, blocklist it (see above).
 
 ### macOS-only, and leans on private-ish schemas
 

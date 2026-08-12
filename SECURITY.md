@@ -8,13 +8,15 @@ It is written to be specific about limitations rather than reassuring.
 If something below sounds too permissive for your threat model, don't
 install the plugin.
 
-## What this plugin does
+## What this project does
 
-`imessage-review` is a Claude Cowork plugin that:
+`imessage-review` is an iMessage integration for AI assistants (Claude Cowork,
+Grok Bot, etc.) that:
 
 - Reads your local Messages database (`~/Library/Messages/chat.db`) so
-  Claude can search, summarize, and surface messages that need a reply.
-- Optionally sends iMessages on your behalf, gated behind an in-Cowork
+  your AI assistant can search, summarize, and surface messages that need
+  a reply.
+- Optionally sends iMessages on your behalf, gated behind a
   preview-and-confirm step.
 
 Both paths go through a single on-device helper process: a Python
