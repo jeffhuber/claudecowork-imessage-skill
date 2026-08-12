@@ -74,6 +74,11 @@ AppleScript that tells Messages.app to send the message via iMessage or SMS.
 No GUI automation. One subprocess, typically under a second end to end. See
 [Sending below](#sending).
 
+The helper uses the host-specific LaunchAgent
+`com.jeffhuber.claudecowork-imessage`, so it can run alongside the sibling
+Grok Bot helper. Each host must use its own bridge folder, request queue,
+responses, policies, logs, and nonces.
+
 ## Install
 
 ### The fast path — from a release
@@ -136,7 +141,7 @@ helper wants to control Messages"*. Click **OK**. After that, the grant
 lives under:
 
   System Settings → Privacy & Security → Automation →
-    cowork-imessage-helper → Messages
+    claude-cowork-imessage-helper → Messages
 
 This is a **different permission** from Full Disk Access. FDA lets the
 helper read `chat.db`; Automation lets it drive Messages.app via
@@ -326,6 +331,15 @@ so the preview step can't be skipped even by a compromised client.
 Run `./uninstall.sh` from the bridge folder. This removes the launchd
 agent. Files and the Full Disk Access grant are left in place — remove
 those manually if you want a full teardown.
+
+## Upgrading from the legacy LaunchAgent
+
+Versions through v0.4.0 used `com.user.cowork-imessage`, which later collided
+with the original Grok helper identity. The installer removes that legacy agent
+only when its plist points to the exact Claude bridge being upgraded. A legacy
+agent belonging to Grok or an unknown installation is left untouched. Because
+the new wrapper has a distinct name and signature, macOS may require Full Disk
+Access and Automation approval once more.
 
 ## Development
 

@@ -30,7 +30,7 @@ Use this skill when the user asks to:
   Cowork agent (Linux sandbox)             ~/Library (the user's Mac)
   ----------------------------             -------------------------
   Writes request-<id>.json   --> launchd watches control/requests/ -->
-  Reads  response-<id>.json  <-- cowork-imessage-helper (wrapper)  -->
+  Reads  response-<id>.json  <-- claude-cowork-imessage-helper (wrapper)  -->
                                  helper.py (FDA-granted, read-only
                                  copy of chat.db + AddressBook)
 ```
@@ -53,9 +53,11 @@ This plugin ships the helper source and install scripts bundled inside the
 skill directory (alongside this `SKILL.md`):
 
 - `install.sh` / `uninstall.sh`
-- `com.user.cowork-imessage.plist.template`
+- `bootstrap.sh`
+- `com.jeffhuber.claudecowork-imessage.plist.template`
 - `bin/cowork_imessage_helper.c` (wrapper source)
 - `bin/helper.py` (Python worker)
+- `bin/send_gate.py` (send gate)
 
 The user runs a one-time install into the Cowork folder they want to use as
 the request/response bridge. Order of operations the first time a user asks
@@ -63,27 +65,25 @@ Claude to read iMessages:
 
 1. Verify the user has selected a Cowork folder. If not, tell them to pick
    one (it will hold `control/` and `bin/`). Call it the "bridge folder".
-2. Check whether `<bridge folder>/bin/cowork-imessage-helper` exists. If
+2. Check whether `<bridge folder>/bin/claude-cowork-imessage-helper` exists. If
    missing, the helper isn't installed. Guide the user through these steps:
 
-   a. Copy the plugin's install assets to the bridge folder:
+   a. Run the bundled bootstrap script with the selected bridge folder. Use
+      the script's actual path supplied by the installed plugin; do not derive
+      it from `$0`:
 
       ```bash
-      SRC="$(dirname "$(dirname "$0")")"  # path to this skill dir
-      DEST="<bridge folder>"
-      cp "$SRC/install.sh" "$SRC/uninstall.sh" \
-         "$SRC/com.user.cowork-imessage.plist.template" "$DEST/"
-      mkdir -p "$DEST/bin"
-      cp "$SRC/bin/cowork_imessage_helper.c" "$SRC/bin/helper.py" "$DEST/bin/"
+      "<installed-plugin-assets>/skills/imessage-review/bootstrap.sh" \
+        "<bridge folder>"
       ```
 
    b. In Terminal: `cd <bridge folder> && chmod +x install.sh && ./install.sh`
    c. When install.sh prints FDA instructions, guide the user through:
       System Settings → Privacy & Security → Full Disk Access → + →
-      paste the path printed (e.g. `<bridge folder>/bin/cowork-imessage-helper`).
+      paste the path printed (e.g. `<bridge folder>/bin/claude-cowork-imessage-helper`).
 
 3. Verify: `<bridge folder>/control/{requests,responses}/` and `log.txt`
-   exist, and `~/Library/LaunchAgents/com.user.cowork-imessage.plist`
+   exist, and `~/Library/LaunchAgents/com.jeffhuber.claudecowork-imessage.plist`
    exists.
 
 If any verification fails, tell the user exactly which step broke and show
@@ -268,11 +268,11 @@ explicit user OK before calling `send`.
 ### Automation permission (one-time, separate from Full Disk Access)
 
 The first time the helper calls `osascript` to send via Messages, macOS
-will show an Automation prompt: "cowork-imessage-helper wants to control
+will show an Automation prompt: "claude-cowork-imessage-helper wants to control
 Messages." Click **OK**. After that, the grant lives under:
 
   System Settings → Privacy & Security → Automation →
-    cowork-imessage-helper → Messages (toggle on)
+    claude-cowork-imessage-helper → Messages (toggle on)
 
 If the wrapper binary is rebuilt with a different CDHash, the grant needs
 to be removed and re-added (same as Full Disk Access).
@@ -319,7 +319,7 @@ threads here.
 | `SKILL.md` | This file. |
 | `install.sh` | One-time setup: builds + signs wrapper, installs plist, bootstraps launchd. |
 | `uninstall.sh` | Removes the launchd agent. Leaves files + FDA grant. |
-| `com.user.cowork-imessage.plist.template` | launchd agent template. Filled in by `install.sh` and copied to `~/Library/LaunchAgents/`. |
+| `com.jeffhuber.claudecowork-imessage.plist.template` | launchd agent template. Filled in by `install.sh` and copied to `~/Library/LaunchAgents/`. |
 | `bin/cowork_imessage_helper.c` | Tiny hardened wrapper. FDA is granted to this. Ignores argv, sanitizes environment, execs helper.py. |
 | `bin/helper.py` | Python helper. Scans `control/requests/`, dispatches actions, writes `control/responses/response-*.json`. |
 | `bin/send_gate.py` | Helper-side preview/confirm gate. Mints single-use nonces on `send_preview`, consumes them on `send`. Persists under `<bridge>/nonces/`. (v0.4.0+) |
@@ -332,5 +332,5 @@ threads here.
 | `control/requests/` | Agent writes request JSON here. Watched by launchd. |
 | `control/responses/` | Helper writes response JSON here. Agent reads. |
 | `control/log.txt` | Helper stderr + logging. First place to check when debugging. |
-| `bin/cowork-imessage-helper` | Compiled, ad-hoc signed wrapper (the FDA target). |
+| `bin/claude-cowork-imessage-helper` | Compiled, ad-hoc signed wrapper (the FDA target). |
 | `nonces/` | Short-lived per-nonce files bound to previewed sends. Created on first preview; TTL-reaped on every helper run. (v0.4.0+) |
