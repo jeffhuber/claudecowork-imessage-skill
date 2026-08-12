@@ -1,12 +1,12 @@
 #!/bin/bash
-# install.sh — one-time setup for the cowork-imessage helper.
+# install.sh — one-time setup for the Claude Cowork iMessage helper.
 #
 # What this does, in order:
 #   1. Sanity-checks that we're on macOS with the Xcode Command Line Tools
 #      installed (for clang + codesign).
 #   2. Creates control/requests, control/responses, and contacts/ if missing.
-#   3. chmod 500 bin/helper.py so the wrapper won't refuse to exec it.
-#   4. Compiles bin/cowork-imessage-helper with the install dir baked in.
+#   3. Locks down the Python worker and send-gate module.
+#   4. Compiles the FDA wrapper and native send-confirmation helper.
 #   5. Ad-hoc code-signs the wrapper so macOS can give FDA a stable identity
 #      to attach to. Re-signing on content-identical rebuilds keeps the grant.
 #   6. Fills in the launchd plist template and installs it under
@@ -18,14 +18,24 @@
 
 set -euo pipefail
 
-INSTALL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ---- Early guard: reject root/sudo ------------------------------------------
+if [[ "$EUID" -eq 0 ]]; then
+    printf "\033[31mError: Do not run this installer as root or with sudo.\033[0m\n" 1>&2
+    printf "This is a per-user LaunchAgent. Run as your normal user:\n" 1>&2
+    printf "  ./install.sh\n" 1>&2
+    exit 1
+fi
+
+INSTALL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 BIN_DIR="$INSTALL_ROOT/bin"
 CONTROL_DIR="$INSTALL_ROOT/control"
 CONTACTS_DIR="$INSTALL_ROOT/contacts"
 HELPER_PY="$BIN_DIR/helper.py"
-WRAPPER_SRC="$BIN_DIR/cowork_imessage_helper.c"
 SEND_GATE_PY="$BIN_DIR/send_gate.py"
+WRAPPER_SRC="$BIN_DIR/cowork_imessage_helper.c"
 WRAPPER_BIN="$BIN_DIR/claude-cowork-imessage-helper"
+CONFIRM_SRC="$BIN_DIR/confirm_imessage_send.m"
+CONFIRM_BIN="$BIN_DIR/claude-cowork-imessage-confirm"
 PLIST_TEMPLATE="$INSTALL_ROOT/com.jeffhuber.claudecowork-imessage.plist.template"
 PLIST_DEST="$HOME/Library/LaunchAgents/com.jeffhuber.claudecowork-imessage.plist"
 LAUNCHCTL_LABEL="com.jeffhuber.claudecowork-imessage"
@@ -58,6 +68,11 @@ for cmd in clang codesign launchctl python3; do
     fi
 done
 
+if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 9))'; then
+    red "Python 3.9 or newer is required. Found: $(python3 --version 2>&1)"
+    exit 1
+fi
+
 if [[ ! -f "$WRAPPER_SRC" ]]; then
     red "Missing $WRAPPER_SRC"
     exit 1
@@ -70,16 +85,24 @@ if [[ ! -f "$SEND_GATE_PY" ]]; then
     red "Missing $SEND_GATE_PY"
     exit 1
 fi
-if [[ ! -f "$LEGACY_MIGRATOR" ]]; then
-    red "Missing $LEGACY_MIGRATOR"
+if [[ ! -f "$CONFIRM_SRC" ]]; then
+    red "Missing $CONFIRM_SRC"
     exit 1
 fi
 if [[ ! -f "$PLIST_TEMPLATE" ]]; then
     red "Missing $PLIST_TEMPLATE"
     exit 1
 fi
+if [[ ! -f "$LEGACY_MIGRATOR" ]]; then
+    red "Missing $LEGACY_MIGRATOR"
+    exit 1
+fi
+if [[ ! -f "$INSTALL_ROOT/contacts/allowed_chats.txt.template" ]]; then
+    red "Missing allowlist template at contacts/allowed_chats.txt.template"
+    exit 1
+fi
 
-bold "cowork-imessage installer"
+bold "Claude Cowork iMessage helper installer"
 echo "  install root : $INSTALL_ROOT"
 echo "  helper.py    : $HELPER_PY"
 echo "  wrapper bin  : $WRAPPER_BIN"
@@ -89,7 +112,8 @@ echo
 # ---- 2. control / contacts directories -----------------------------------
 mkdir -p "$CONTROL_DIR/requests" "$CONTROL_DIR/responses" "$CONTACTS_DIR"
 touch "$CONTROL_DIR/log.txt"
-chmod 700 "$CONTROL_DIR" "$CONTROL_DIR/requests" "$CONTROL_DIR/responses" "$CONTACTS_DIR"
+chmod 700 "$INSTALL_ROOT" "$CONTROL_DIR" "$CONTROL_DIR/requests" \
+    "$CONTROL_DIR/responses" "$CONTACTS_DIR"
 chmod 600 "$CONTROL_DIR/log.txt"
 
 if [[ ! -f "$CONTACTS_DIR/blocked_chats.txt" ]]; then
@@ -114,7 +138,20 @@ EOF
     green "  created $CONTACTS_DIR/blocked_chats.txt (empty)"
 fi
 
-# ---- 3. lock down helper.py ----------------------------------------------
+if [[ ! -f "$CONTACTS_DIR/allowed_chats.txt" ]]; then
+    cp "$INSTALL_ROOT/contacts/allowed_chats.txt.template" \
+        "$CONTACTS_DIR/allowed_chats.txt"
+    chmod 600 "$CONTACTS_DIR/allowed_chats.txt"
+    green "  created $CONTACTS_DIR/allowed_chats.txt (empty)"
+fi
+
+if [[ ! -f "$CONTACTS_DIR/read_policy.txt" ]]; then
+    printf 'blocklist\n' > "$CONTACTS_DIR/read_policy.txt"
+    chmod 600 "$CONTACTS_DIR/read_policy.txt"
+    green "  created $CONTACTS_DIR/read_policy.txt (blocklist)"
+fi
+
+# ---- 3. lock down Python code --------------------------------------------
 chmod 500 "$HELPER_PY" "$SEND_GATE_PY"
 green "  chmod 500 $HELPER_PY and $SEND_GATE_PY"
 
@@ -128,16 +165,29 @@ fi
 
 clang -Wall -Wextra -Werror -O2 \
     -DHELPER_SCRIPT="\"$HELPER_PY\"" \
+    -DSEND_GATE_SCRIPT="\"$SEND_GATE_PY\"" \
+    -DCONFIRM_HELPER="\"$CONFIRM_BIN\"" \
+    -DBRIDGE_ROOT="\"$INSTALL_ROOT\"" \
+    -DHELPER_DISPLAY_NAME='"claude-cowork-imessage-helper"' \
+    -DHOST_DISPLAY_NAME='"Claude Cowork"' \
     -DPYTHON_INTERPRETER="\"$PYTHON3_PATH\"" \
     -o "$WRAPPER_BIN" "$WRAPPER_SRC"
 chmod 700 "$WRAPPER_BIN"
 green "  built $WRAPPER_BIN"
+
+clang -Wall -Wextra -Werror -fobjc-arc \
+    -framework AppKit -framework Foundation \
+    -o "$CONFIRM_BIN" "$CONFIRM_SRC"
+chmod 700 "$CONFIRM_BIN"
+green "  built $CONFIRM_BIN"
 
 # ---- 5. ad-hoc code-sign -------------------------------------------------
 # The hardened runtime flag blocks DYLD_INSERT_LIBRARIES et al, so an
 # attacker can't hijack our FDA grant via library injection.
 codesign --force --sign - --options runtime "$WRAPPER_BIN"
 green "  ad-hoc signed $WRAPPER_BIN"
+codesign --force --sign - --options runtime "$CONFIRM_BIN"
+green "  ad-hoc signed $CONFIRM_BIN"
 
 # Record the CDHash so the user can tell whether a re-sign is needed later.
 CDHASH=$(codesign -dvvv "$WRAPPER_BIN" 2>&1 | awk -F'=' '/CDHash=/{print $2; exit}')
@@ -145,10 +195,31 @@ echo "  cdhash: ${CDHASH:-unknown}"
 
 # ---- 6. launchd plist ----------------------------------------------------
 mkdir -p "$(dirname "$PLIST_DEST")"
-sed "s|{{INSTALL_ROOT}}|$INSTALL_ROOT|g" "$PLIST_TEMPLATE" > "$PLIST_DEST"
+
+# Use Python to generate the plist with proper XML escaping instead of sed.
+python3 - "$INSTALL_ROOT" "$INSTALL_ROOT" "$PLIST_DEST" "$PLIST_TEMPLATE" <<'PYGEN'
+import sys, xml.etree.ElementTree as ET
+
+code_root, bridge_root, dest, template = sys.argv[1:]
+
+# Read template and replace placeholder with properly escaped path.
+tree = ET.parse(template)
+root = tree.getroot()
+
+# Find all <string> elements and replace the path placeholders.
+for elem in root.iter("string"):
+    if elem.text:
+        elem.text = elem.text.replace("{{CODE_ROOT}}", code_root)
+        elem.text = elem.text.replace("{{BRIDGE_ROOT}}", bridge_root)
+
+tree.write(dest, encoding="UTF-8", xml_declaration=True)
+PYGEN
+
 chmod 644 "$PLIST_DEST"
 green "  wrote $PLIST_DEST"
 
+# Claim the legacy identity only when it points to this exact prior Claude
+# installation. An unrelated installation using the old shared label is left alone.
 if [[ -e "$LEGACY_PLIST" || -L "$LEGACY_PLIST" ]]; then
     if python3 "$LEGACY_MIGRATOR" \
         --plist "$LEGACY_PLIST" \
@@ -168,7 +239,8 @@ fi
 
 # Bootstrap (or restart) the agent.
 if launchctl print "gui/$UID/$LAUNCHCTL_LABEL" >/dev/null 2>&1; then
-    launchctl bootout "gui/$UID/$LAUNCHCTL_LABEL" >/dev/null 2>&1 || true
+    launchctl bootout "gui/$UID/$LAUNCHCTL_LABEL"
+    echo "  existing agent unloaded"
 fi
 launchctl bootstrap "gui/$UID" "$PLIST_DEST"
 launchctl enable "gui/$UID/$LAUNCHCTL_LABEL"
@@ -188,14 +260,15 @@ echo
 echo "  3. Select 'claude-cowork-imessage-helper' and make sure its toggle is ON."
 echo "  4. (If prompted to quit and reopen anything, just click 'Later'.)"
 echo
-echo "Verify by asking Claude: \"review my imessages over the last 2 days\""
+echo "Verify by asking Claude Cowork: \"review my imessages over the last 2 days\""
 echo
 yellow "Note on sending (v0.3.0+):"
-echo "  The first time you ask Claude to send an iMessage, macOS will"
+echo "  The first time you ask Claude Cowork to send an iMessage, macOS will"
 echo "  prompt 'claude-cowork-imessage-helper wants to control Messages.' Click OK."
 echo "  After that, the grant lives under:"
 echo "    System Settings -> Privacy & Security -> Automation"
 echo "  (This is a separate permission from Full Disk Access.)"
 echo
 echo "Logs: $CONTROL_DIR/log.txt"
+echo "Doctor: python3 $INSTALL_ROOT/tools/doctor.py --bridge $INSTALL_ROOT"
 echo "Uninstall: ./uninstall.sh"

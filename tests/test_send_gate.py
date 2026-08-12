@@ -30,7 +30,9 @@ from send_gate import (  # noqa: E402
 class TestSendGate(unittest.TestCase):
     def setUp(self):
         # Fresh bridge dir per test; env override routes all paths there.
-        self._tmp = tempfile.mkdtemp(prefix="cowork-imessage-test-")
+        self._tmp = str(pathlib.Path(
+            tempfile.mkdtemp(prefix="cowork-imessage-test-")
+        ).resolve())
         os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = self._tmp
 
     def tearDown(self):

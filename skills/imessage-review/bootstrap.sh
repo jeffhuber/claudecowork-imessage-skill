@@ -11,7 +11,7 @@ if [[ -z "$DESTINATION" ]]; then
     exit 2
 fi
 
-mkdir -p "$DESTINATION/bin" "$DESTINATION/tools"
+mkdir -p "$DESTINATION/bin" "$DESTINATION/tools" "$DESTINATION/contacts"
 for file in \
     install.sh \
     uninstall.sh \
@@ -20,13 +20,18 @@ for file in \
 done
 for file in \
     cowork_imessage_helper.c \
+    confirm_imessage_send.m \
     helper.py \
     send_gate.py; do
     cp "$SOURCE_ROOT/bin/$file" "$DESTINATION/bin/$file"
 done
 cp "$SOURCE_ROOT/tools/migrate_legacy_launchagent.py" "$DESTINATION/tools/"
+cp "$SOURCE_ROOT/tools/doctor.py" "$DESTINATION/tools/"
+cp "$SOURCE_ROOT/tools/configure_allowlist.py" "$DESTINATION/tools/"
+cp "$SOURCE_ROOT/contacts/allowed_chats.txt.template" "$DESTINATION/contacts/"
+cp "$SOURCE_ROOT/contacts/blocked_chats.txt.template" "$DESTINATION/contacts/"
 chmod 700 "$DESTINATION/install.sh" "$DESTINATION/uninstall.sh"
-chmod 700 "$DESTINATION/tools/migrate_legacy_launchagent.py"
+chmod 700 "$DESTINATION/tools/"*.py
 
 echo "Copied the complete Claude Cowork iMessage helper to $DESTINATION"
 echo "Next: cd \"$DESTINATION\" && ./install.sh"

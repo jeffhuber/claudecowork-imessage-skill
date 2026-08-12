@@ -21,8 +21,9 @@ import importlib.util
 import pathlib
 import sys
 
-_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-_BIN = _REPO_ROOT / "skills" / "imessage-review" / "bin"
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+SKILL_ROOT = REPO_ROOT / "skills" / "imessage-review"
+_BIN = SKILL_ROOT / "bin"
 _HELPER_PY = _BIN / "helper.py"
 
 if str(_BIN) not in sys.path:
