@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-LABEL="com.user.cowork-imessage"
+LABEL="com.jeffhuber.claudecowork-imessage"
 PLIST_DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 if launchctl print "gui/$UID/$LABEL" >/dev/null 2>&1; then
@@ -27,5 +27,5 @@ Uninstalled the launchd agent.
 To fully remove the helper:
   - Delete this folder.
   - Open System Settings -> Privacy & Security -> Full Disk Access and
-    revoke 'cowork-imessage-helper'.
+    revoke 'claude-cowork-imessage-helper'.
 EOF

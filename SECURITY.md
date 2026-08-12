@@ -83,9 +83,9 @@ compute base: if something can write there, it owns the helper.
 ### Automation → Messages (v0.3.0+)
 
 Required to send. The first send triggers a one-time macOS prompt:
-"cowork-imessage-helper wants to control Messages." The grant lives
+"claude-cowork-imessage-helper wants to control Messages." The grant lives
 under System Settings → Privacy & Security → Automation →
-cowork-imessage-helper → Messages.
+claude-cowork-imessage-helper → Messages.
 
 Concretely, this grants the helper the ability to:
 
@@ -104,6 +104,10 @@ where the client writes request files and the helper writes response
 files. `launchd`'s `WatchPaths` triggers the helper on change.
 
 This is the primary trust boundary you need to understand.
+
+Claude and Grok installations use distinct LaunchAgents, executables, bridge
+folders, policy files, responses, logs, and nonces. They can run concurrently,
+but must not be configured to share one bridge queue.
 
 **What the bridge folder protects against:**
 
@@ -256,9 +260,9 @@ To fully remove the plugin's access:
 4. `rm -rf ~/cowork-imessage` (bridge folder; includes helper and
    any pending request/response files).
 5. System Settings → Privacy & Security → Full Disk Access → remove
-   `cowork-imessage-helper`.
+   `claude-cowork-imessage-helper`.
 6. System Settings → Privacy & Security → Automation →
-   cowork-imessage-helper → turn Messages off (or remove the entry
+   claude-cowork-imessage-helper → turn Messages off (or remove the entry
    entirely).
 
 ## Reporting a vulnerability

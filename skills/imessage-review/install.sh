@@ -10,7 +10,8 @@
 #   5. Ad-hoc code-signs the wrapper so macOS can give FDA a stable identity
 #      to attach to. Re-signing on content-identical rebuilds keeps the grant.
 #   6. Fills in the launchd plist template and installs it under
-#      ~/Library/LaunchAgents/com.user.cowork-imessage.plist, then bootstraps it.
+#      ~/Library/LaunchAgents/com.jeffhuber.claudecowork-imessage.plist, then
+#      bootstraps it.
 #   7. Prints exact next-steps: grant Full Disk Access to the wrapper binary.
 #
 # Safe to re-run. It will not clobber grants or overwrite user files.
@@ -23,10 +24,15 @@ CONTROL_DIR="$INSTALL_ROOT/control"
 CONTACTS_DIR="$INSTALL_ROOT/contacts"
 HELPER_PY="$BIN_DIR/helper.py"
 WRAPPER_SRC="$BIN_DIR/cowork_imessage_helper.c"
-WRAPPER_BIN="$BIN_DIR/cowork-imessage-helper"
-PLIST_TEMPLATE="$INSTALL_ROOT/com.user.cowork-imessage.plist.template"
-PLIST_DEST="$HOME/Library/LaunchAgents/com.user.cowork-imessage.plist"
-LAUNCHCTL_LABEL="com.user.cowork-imessage"
+SEND_GATE_PY="$BIN_DIR/send_gate.py"
+WRAPPER_BIN="$BIN_DIR/claude-cowork-imessage-helper"
+PLIST_TEMPLATE="$INSTALL_ROOT/com.jeffhuber.claudecowork-imessage.plist.template"
+PLIST_DEST="$HOME/Library/LaunchAgents/com.jeffhuber.claudecowork-imessage.plist"
+LAUNCHCTL_LABEL="com.jeffhuber.claudecowork-imessage"
+LEGACY_LABEL="com.user.cowork-imessage"
+LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
+LEGACY_WRAPPER="$BIN_DIR/cowork-imessage-helper"
+LEGACY_MIGRATOR="$INSTALL_ROOT/tools/migrate_legacy_launchagent.py"
 
 bold() { printf "\033[1m%s\033[0m\n" "$*"; }
 green() { printf "\033[32m%s\033[0m\n" "$*"; }
@@ -58,6 +64,14 @@ if [[ ! -f "$WRAPPER_SRC" ]]; then
 fi
 if [[ ! -f "$HELPER_PY" ]]; then
     red "Missing $HELPER_PY"
+    exit 1
+fi
+if [[ ! -f "$SEND_GATE_PY" ]]; then
+    red "Missing $SEND_GATE_PY"
+    exit 1
+fi
+if [[ ! -f "$LEGACY_MIGRATOR" ]]; then
+    red "Missing $LEGACY_MIGRATOR"
     exit 1
 fi
 if [[ ! -f "$PLIST_TEMPLATE" ]]; then
@@ -101,8 +115,8 @@ EOF
 fi
 
 # ---- 3. lock down helper.py ----------------------------------------------
-chmod 500 "$HELPER_PY"
-green "  chmod 500 $HELPER_PY"
+chmod 500 "$HELPER_PY" "$SEND_GATE_PY"
+green "  chmod 500 $HELPER_PY and $SEND_GATE_PY"
 
 # ---- 4. build wrapper binary --------------------------------------------
 bold "Building wrapper binary..."
@@ -135,6 +149,23 @@ sed "s|{{INSTALL_ROOT}}|$INSTALL_ROOT|g" "$PLIST_TEMPLATE" > "$PLIST_DEST"
 chmod 644 "$PLIST_DEST"
 green "  wrote $PLIST_DEST"
 
+if [[ -e "$LEGACY_PLIST" || -L "$LEGACY_PLIST" ]]; then
+    if python3 "$LEGACY_MIGRATOR" \
+        --plist "$LEGACY_PLIST" \
+        --program "$LEGACY_WRAPPER" \
+        --watch "$INSTALL_ROOT/control/requests"; then
+        if launchctl print "gui/$UID/$LEGACY_LABEL" >/dev/null 2>&1; then
+            launchctl bootout "gui/$UID/$LEGACY_LABEL"
+        fi
+        rm -f "$LEGACY_PLIST"
+        green "  migrated this Claude install from legacy label $LEGACY_LABEL"
+    else
+        yellow "  retained legacy $LEGACY_LABEL because it belongs to another install"
+    fi
+elif launchctl print "gui/$UID/$LEGACY_LABEL" >/dev/null 2>&1; then
+    yellow "  legacy $LEGACY_LABEL is loaded without a verifiable plist; left untouched"
+fi
+
 # Bootstrap (or restart) the agent.
 if launchctl print "gui/$UID/$LAUNCHCTL_LABEL" >/dev/null 2>&1; then
     launchctl bootout "gui/$UID/$LAUNCHCTL_LABEL" >/dev/null 2>&1 || true
@@ -154,14 +185,14 @@ echo "  2. Click the + button, then press Cmd-Shift-G and paste:"
 echo
 echo "       $WRAPPER_BIN"
 echo
-echo "  3. Select 'cowork-imessage-helper' and make sure its toggle is ON."
+echo "  3. Select 'claude-cowork-imessage-helper' and make sure its toggle is ON."
 echo "  4. (If prompted to quit and reopen anything, just click 'Later'.)"
 echo
 echo "Verify by asking Claude: \"review my imessages over the last 2 days\""
 echo
 yellow "Note on sending (v0.3.0+):"
 echo "  The first time you ask Claude to send an iMessage, macOS will"
-echo "  prompt 'cowork-imessage-helper wants to control Messages.' Click OK."
+echo "  prompt 'claude-cowork-imessage-helper wants to control Messages.' Click OK."
 echo "  After that, the grant lives under:"
 echo "    System Settings -> Privacy & Security -> Automation"
 echo "  (This is a separate permission from Full Disk Access.)"
