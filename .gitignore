@@ -10,6 +10,12 @@ __pycache__/
 bin/cowork-imessage-helper
 *.plugin
 
+# Per-install private runtime state
+skills/imessage-review/contacts/blocked_chats.txt
+skills/imessage-review/contacts/allowed_chats.txt
+skills/imessage-review/contacts/read_policy.txt
+skills/imessage-review/control/
+
 # Editor scratch
 *.swp
 .idea/

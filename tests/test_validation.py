@@ -183,6 +183,7 @@ class ActionWhitelistTests(unittest.TestCase):
         "contacts_lookup",
         "send_preview",
         "send",
+        "status",
     })
 
     def test_action_set_is_exactly_expected(self):

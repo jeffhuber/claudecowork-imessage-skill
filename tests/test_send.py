@@ -17,6 +17,7 @@ Coverage:
 from __future__ import annotations
 
 import os
+import pathlib
 import shutil
 import sys
 import tempfile
@@ -46,7 +47,9 @@ class _BridgeDirMixin:
     at a per-test tempdir so tests don't touch ~/cowork-imessage/nonces."""
 
     def setUp(self):
-        self._bridge_tmp = tempfile.mkdtemp(prefix="cowork-imessage-test-")
+        self._bridge_tmp = str(pathlib.Path(
+            tempfile.mkdtemp(prefix="cowork-imessage-test-")
+        ).resolve())
         os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = self._bridge_tmp
 
     def tearDown(self):
@@ -249,7 +252,9 @@ class SendActionTests(_BridgeDirMixin, unittest.TestCase):
                 params.get("service", "iMessage"),
             )
 
-        with mock.patch.object(helper, "_run_osascript", side_effect=fake_run):
+        with mock.patch.object(
+            helper, "_run_send_confirmation", return_value=True
+        ), mock.patch.object(helper, "_run_osascript", side_effect=fake_run):
             result = helper.action_send(
                 params, None, self.contacts, self.blocklist,
             )
@@ -285,15 +290,17 @@ class SendActionTests(_BridgeDirMixin, unittest.TestCase):
         self.assertIn("service type = SMS", captured["script"])
         self.assertNotIn("service type = iMessage", captured["script"])
 
-    def test_recipient_escaping(self):
-        # If someone passes a recipient that contains a double-quote, the
-        # escape should neutralize it. validate_chat allows the char through
-        # because it's not clearly invalid for emails/group IDs.
-        _, captured = self._run(
-            {"to": 'foo"bar@example.com', "text": "x"},
-        )
-        # The AppleScript literal should have the quote escaped.
-        self.assertIn('foo\\"bar@example.com', captured["script"])
+    def test_malformed_recipient_is_rejected(self):
+        for recipient in (
+            'foo"bar@example.com',
+            ".alice@example.com",
+            "alice..example@example.com",
+            "alice@-example.com",
+        ):
+            with self.subTest(recipient=recipient), self.assertRaisesRegex(
+                ValueError, "phone number"
+            ):
+                self._run({"to": recipient, "text": "x"})
 
     def test_body_goes_to_tempfile(self):
         # Verify the POSIX-file path referenced in the script actually
@@ -314,7 +321,9 @@ class SendActionTests(_BridgeDirMixin, unittest.TestCase):
                 captured["body_content"] = f.read()
             return (0, "", "")
 
-        with mock.patch.object(helper, "_run_osascript", side_effect=fake_run):
+        with mock.patch.object(
+            helper, "_run_send_confirmation", return_value=True
+        ), mock.patch.object(helper, "_run_osascript", side_effect=fake_run):
             helper.action_send(
                 {"to": "+14155551234", "text": "body via tempfile 🎉",
                  "send_nonce": _mint("+14155551234", "body via tempfile 🎉")},
@@ -336,7 +345,9 @@ class SendActionTests(_BridgeDirMixin, unittest.TestCase):
             captured["path"] = m.group(1).replace("\\\\", "\\")
             return (1, "", "Messages got an error: not authorized")
 
-        with mock.patch.object(helper, "_run_osascript", side_effect=fake_run):
+        with mock.patch.object(
+            helper, "_run_send_confirmation", return_value=True
+        ), mock.patch.object(helper, "_run_osascript", side_effect=fake_run):
             with self.assertRaises(RuntimeError) as ctx:
                 helper.action_send(
                     {"to": "+14155551234", "text": "x",
@@ -444,7 +455,9 @@ class SendGateIntegrationTests(_BridgeDirMixin, unittest.TestCase):
     def test_nonce_is_single_use(self):
         # First send consumes the nonce; second send with same nonce fails.
         nonce = _mint("+14155551234", "hi")
-        with mock.patch.object(helper, "_run_osascript", return_value=(0, "", "")):
+        with mock.patch.object(
+            helper, "_run_send_confirmation", return_value=True
+        ), mock.patch.object(helper, "_run_osascript", return_value=(0, "", "")):
             helper.action_send(
                 {"to": "+14155551234", "text": "hi", "send_nonce": nonce},
                 None, self.contacts, self.blocklist,
@@ -463,7 +476,9 @@ class SendGateIntegrationTests(_BridgeDirMixin, unittest.TestCase):
             None, self.contacts, self.blocklist,
         )
         nonce = preview["send_nonce"]
-        with mock.patch.object(helper, "_run_osascript", return_value=(0, "", "")):
+        with mock.patch.object(
+            helper, "_run_send_confirmation", return_value=True
+        ), mock.patch.object(helper, "_run_osascript", return_value=(0, "", "")):
             result = helper.action_send(
                 {"to": "+14155551234", "text": "hello", "send_nonce": nonce},
                 None, self.contacts, self.blocklist,

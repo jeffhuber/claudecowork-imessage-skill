@@ -10,12 +10,12 @@ Security posture:
   - Actions are strictly whitelisted (no eval/exec/shell-out).
   - All SQL uses parameterized queries.
   - chat.db is copied to a per-run tempfile (cleaned up on exit).
-  - Blocklisted chats are dropped before any message text is returned.
+  - Read policy is applied before any message text is returned.
   - 2FA codes, card numbers, and SSN patterns are redacted in responses.
   - Response writes are atomic (tmp + rename) so the agent never reads a
     half-written file.
 
-This script should be invoked only by the signed `cowork-imessage-helper`
+This script should be invoked only by the signed `claude-cowork-imessage-helper`
 wrapper. Running it directly still works but without the environment
 hardening the wrapper provides.
 """
@@ -26,8 +26,8 @@ import glob
 import json
 import os
 import re
-import shutil
 import sqlite3
+import stat
 import struct
 import sys
 import tempfile
@@ -35,6 +35,8 @@ import time
 import traceback
 import uuid
 from collections import defaultdict
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -42,11 +44,33 @@ from typing import Any, Iterable
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-INSTALL_ROOT = Path(__file__).resolve().parent.parent
-REQUESTS_DIR = INSTALL_ROOT / "control" / "requests"
-RESPONSES_DIR = INSTALL_ROOT / "control" / "responses"
-LOG_PATH = INSTALL_ROOT / "control" / "log.txt"
-BLOCKLIST_PATH = INSTALL_ROOT / "contacts" / "blocked_chats.txt"
+CODE_ROOT = Path(__file__).resolve().parent.parent
+BRIDGE_ROOT = Path(
+    os.path.abspath(
+        os.path.expanduser(os.environ.get("COWORK_IMESSAGE_BRIDGE_DIR", str(CODE_ROOT)))
+    )
+)
+REQUESTS_DIR = BRIDGE_ROOT / "control" / "requests"
+RESPONSES_DIR = BRIDGE_ROOT / "control" / "responses"
+LOG_PATH = BRIDGE_ROOT / "control" / "log.txt"
+BLOCKLIST_PATH = BRIDGE_ROOT / "contacts" / "blocked_chats.txt"
+ALLOWLIST_PATH = Path(
+    os.path.abspath(
+        os.path.expanduser(
+            os.environ.get("COWORK_IMESSAGE_READ_ALLOWLIST")
+            or str(
+                BRIDGE_ROOT / "contacts" / "allowed_chats.txt"
+            )
+        )
+    )
+)
+READ_POLICY_PATH = BRIDGE_ROOT / "contacts" / "read_policy.txt"
+CONFIRM_HELPER_PATH = CODE_ROOT / "bin" / "claude-cowork-imessage-confirm"
+CHAT_DB_PATH = Path.home() / "Library" / "Messages" / "chat.db"
+HOST_DISPLAY_NAME = os.environ.get("IMESSAGE_HOST_DISPLAY_NAME", "Claude Cowork")
+
+HELPER_VERSION = "1.1.0"
+PROTOCOL_VERSION = "1.1"
 
 # ---------------------------------------------------------------------------
 # Sibling module loading
@@ -60,7 +84,7 @@ import importlib.util as _importlib_util  # noqa: E402
 
 
 def _load_sibling(name: str):
-    path = INSTALL_ROOT / "bin" / f"{name}.py"
+    path = CODE_ROOT / "bin" / f"{name}.py"
     spec = _importlib_util.spec_from_file_location(name, path)
     mod = _importlib_util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -69,7 +93,7 @@ def _load_sibling(name: str):
 
 # Route send_gate's state to our install tree so a non-default install
 # (helper lives somewhere other than ~/cowork-imessage/) still works.
-os.environ.setdefault("COWORK_IMESSAGE_BRIDGE_DIR", str(INSTALL_ROOT))
+os.environ.setdefault("COWORK_IMESSAGE_BRIDGE_DIR", str(BRIDGE_ROOT))
 _send_gate = _load_sibling("send_gate")
 SEND_NONCE_TTL = _send_gate.SEND_NONCE_TTL
 SendGateError = _send_gate.SendGateError
@@ -86,6 +110,10 @@ MAX_LIMIT = 500
 MAX_SEARCH_LEN = 200
 MAX_TEXT_SNIPPET = 600
 MAX_CONTEXT_MESSAGES = 8
+MAX_REQUEST_BYTES = 64 * 1024
+RESPONSE_TTL_S = 60 * 60
+LOG_MAX_BYTES = 1024 * 1024
+LOG_BACKUP_COUNT = 3
 
 # Send-side bounds. iMessage will accept much longer bodies, but capping here
 # limits blast radius if a request is malformed or adversarial. 4000 chars is
@@ -101,13 +129,169 @@ import subprocess  # noqa: E402  — used only by send actions, keep the import 
 
 
 # ---------------------------------------------------------------------------
+# Secure runtime filesystem access
+# ---------------------------------------------------------------------------
+_DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_FILE_NOFOLLOW_FLAGS = os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+
+
+class UnsafeRuntimePath(RuntimeError):
+    """Raised when user-owned bridge state is not a safe local file or directory."""
+
+
+def _validate_private_directory(fd: int, label: str) -> None:
+    metadata = os.fstat(fd)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise UnsafeRuntimePath(f"{label} is not a directory")
+    if metadata.st_uid != os.getuid():
+        raise UnsafeRuntimePath(f"{label} is not owned by the current user")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise UnsafeRuntimePath(f"{label} must not have group/world permissions")
+
+
+def _open_bridge_root() -> int:
+    """Open the absolute bridge path one component at a time without symlinks."""
+    root = Path(os.path.abspath(str(BRIDGE_ROOT)))
+    if not root.is_absolute() or root == Path("/"):
+        raise UnsafeRuntimePath("bridge root must be a non-root absolute path")
+
+    fd = os.open("/", _DIR_OPEN_FLAGS)
+    try:
+        for component in root.parts[1:]:
+            next_fd = os.open(component, _DIR_OPEN_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        _validate_private_directory(fd, f"bridge root {root}")
+        return fd
+    except UnsafeRuntimePath:
+        os.close(fd)
+        raise
+    except OSError as exc:
+        os.close(fd)
+        raise UnsafeRuntimePath(f"unsafe bridge root {root}: {exc}") from exc
+
+
+def _runtime_relative_parts(path: Path) -> tuple[str, ...]:
+    root = Path(os.path.abspath(str(BRIDGE_ROOT)))
+    candidate = Path(os.path.abspath(str(path)))
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise UnsafeRuntimePath(f"runtime path escapes bridge root: {candidate}") from exc
+    if any(part in ("", ".", "..") or "/" in part for part in relative.parts):
+        raise UnsafeRuntimePath(f"invalid runtime path: {candidate}")
+    return relative.parts
+
+
+@contextmanager
+def _private_directory_fd(path: Path, *, create: bool = False):
+    """Yield an anchored descriptor for a private directory below the bridge."""
+    parts = _runtime_relative_parts(path)
+    fd = _open_bridge_root()
+    try:
+        for component in parts:
+            if create:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            try:
+                next_fd = os.open(component, _DIR_OPEN_FLAGS, dir_fd=fd)
+            except OSError as exc:
+                raise UnsafeRuntimePath(f"unsafe runtime directory {path}: {exc}") from exc
+            os.close(fd)
+            fd = next_fd
+            _validate_private_directory(fd, str(path))
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _validate_regular_file(fd: int, label: str, *, private: bool = False) -> os.stat_result:
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise UnsafeRuntimePath(f"{label} is not a regular file")
+    if metadata.st_uid != os.getuid():
+        raise UnsafeRuntimePath(f"{label} is not owned by the current user")
+    if private and stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise UnsafeRuntimePath(f"{label} must not have group/world permissions")
+    return metadata
+
+
+def _stat_regular_at(directory_fd: int, name: str, *, private: bool = False) -> os.stat_result:
+    metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise UnsafeRuntimePath(f"{name} is not a regular file")
+    if metadata.st_uid != os.getuid():
+        raise UnsafeRuntimePath(f"{name} is not owned by the current user")
+    if private and stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise UnsafeRuntimePath(f"{name} must not have group/world permissions")
+    return metadata
+
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+def _rotate_log(control_fd: int) -> None:
+    try:
+        current = _stat_regular_at(control_fd, LOG_PATH.name, private=True)
+    except FileNotFoundError:
+        return
+    if current.st_size < LOG_MAX_BYTES:
+        return
+
+    oldest = f"{LOG_PATH.name}.{LOG_BACKUP_COUNT}"
+    try:
+        _stat_regular_at(control_fd, oldest, private=True)
+    except FileNotFoundError:
+        pass
+    else:
+        os.unlink(oldest, dir_fd=control_fd)
+
+    for index in range(LOG_BACKUP_COUNT - 1, 0, -1):
+        source = f"{LOG_PATH.name}.{index}"
+        destination = f"{LOG_PATH.name}.{index + 1}"
+        try:
+            _stat_regular_at(control_fd, source, private=True)
+        except FileNotFoundError:
+            continue
+        try:
+            _stat_regular_at(control_fd, destination, private=True)
+        except FileNotFoundError:
+            pass
+        os.replace(
+            source,
+            destination,
+            src_dir_fd=control_fd,
+            dst_dir_fd=control_fd,
+        )
+
+    os.replace(
+        LOG_PATH.name,
+        f"{LOG_PATH.name}.1",
+        src_dir_fd=control_fd,
+        dst_dir_fd=control_fd,
+    )
+
+
 def log(msg: str) -> None:
     try:
-        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOG_PATH, "a") as f:
-            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+        with _private_directory_fd(LOG_PATH.parent, create=True) as control_fd:
+            _rotate_log(control_fd)
+            fd = os.open(
+                LOG_PATH.name,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND | _FILE_NOFOLLOW_FLAGS,
+                0o600,
+                dir_fd=control_fd,
+            )
+            try:
+                _validate_regular_file(fd, str(LOG_PATH), private=True)
+                with os.fdopen(fd, "a", encoding="utf-8") as f:
+                    fd = -1
+                    f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+            finally:
+                if fd >= 0:
+                    os.close(fd)
     except Exception:
         pass
 
@@ -116,6 +300,11 @@ def log(msg: str) -> None:
 # attributedBody typedstream decoder (pure Python, no PyObjC)
 # Ported from the original Perplexity skill and kept byte-compatible.
 # ---------------------------------------------------------------------------
+def _attributed_fail(data: bytes, reason: str) -> str:
+    log(f"attributedBody parse failed: {reason}; bytes={len(data)}")
+    return ""
+
+
 def decode_attributed_body(blob: bytes | None) -> str:
     if not blob:
         return ""
@@ -143,13 +332,17 @@ def decode_attributed_body(blob: bytes | None) -> str:
         p += 1
 
     if p >= len(data):
-        return ""
+        return _attributed_fail(data, "EOF before length byte")
 
     b0 = data[p]
     if b0 == 0x81:
+        if p + 3 > len(data):
+            return _attributed_fail(data, "truncated <H length")
         length = struct.unpack("<H", data[p + 1 : p + 3])[0]
         p += 3
     elif b0 == 0x82:
+        if p + 5 > len(data):
+            return _attributed_fail(data, "truncated <I length")
         length = struct.unpack("<I", data[p + 1 : p + 5])[0]
         p += 5
     elif b0 < 0x80:
@@ -158,24 +351,26 @@ def decode_attributed_body(blob: bytes | None) -> str:
     else:
         p += 1
         if p >= len(data):
-            return ""
+            return _attributed_fail(data, "EOF in nested length")
         b0 = data[p]
         if b0 == 0x81:
+            if p + 3 > len(data):
+                return _attributed_fail(data, "truncated nested <H length")
             length = struct.unpack("<H", data[p + 1 : p + 3])[0]
             p += 3
         elif b0 < 0x80:
             length = b0
             p += 1
         else:
-            return ""
+            return _attributed_fail(data, f"unrecognized nested length byte {b0:#x}")
 
     if length <= 0 or p + length > len(data):
-        return ""
+        return _attributed_fail(data, f"length {length} exceeds data at p={p}")
 
     try:
-        return data[p : p + length].decode("utf-8", errors="replace")
-    except Exception:
-        return ""
+        return data[p : p + length].decode("utf-8")
+    except Exception as e:
+        return _attributed_fail(data, f"utf-8 decode failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -371,18 +566,89 @@ def group_label(participants: list[str], contacts: dict[str, str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Blocklist
+# Read privacy policy
 # ---------------------------------------------------------------------------
-def load_blocklist() -> list[str]:
-    if not BLOCKLIST_PATH.exists():
-        return []
+@dataclass(frozen=True)
+class PrivacyPolicy:
+    mode: str
+    blocklist: tuple[str, ...]
+    allowlist: tuple[str, ...]
+
+
+def _load_list(path: Path, require_root_owner: bool = False) -> tuple[str, ...]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return ()
+    if not stat.S_ISREG(metadata.st_mode):
+        log(f"privacy policy rejected: {path} must be a regular file")
+        return ()
+    if require_root_owner:
+        if metadata.st_uid != 0:
+            log(f"privacy policy rejected: {path} must be root-owned")
+            return ()
+        if metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            log(f"privacy policy rejected: {path} has group/world permissions")
+            return ()
     out = []
-    for line in BLOCKLIST_PATH.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         out.append(line)
-    return out
+    return tuple(out)
+
+
+def load_privacy_policy() -> PrivacyPolicy:
+    mode_override = os.environ.get("COWORK_IMESSAGE_READ_POLICY", "runtime")
+    if mode_override in ("allowlist", "blocklist"):
+        mode = mode_override
+    else:
+        try:
+            mode = READ_POLICY_PATH.read_text(encoding="utf-8").strip().lower()
+        except FileNotFoundError:
+            mode = "blocklist"
+        if mode not in ("allowlist", "blocklist"):
+            log(f"invalid read policy {mode!r}; failing closed in allowlist mode")
+            mode = "allowlist"
+
+    require_root = os.environ.get("COWORK_IMESSAGE_REQUIRE_ROOT_POLICY") == "1"
+    return PrivacyPolicy(
+        mode=mode,
+        blocklist=_load_list(BLOCKLIST_PATH),
+        allowlist=_load_list(ALLOWLIST_PATH, require_root_owner=require_root),
+    )
+
+
+def load_blocklist() -> list[str]:
+    """Backward-compatible loader retained for existing integrations/tests."""
+    return list(_load_list(BLOCKLIST_PATH))
+
+
+def _coerce_policy(policy: PrivacyPolicy | list[str]) -> PrivacyPolicy:
+    if isinstance(policy, PrivacyPolicy):
+        return policy
+    return PrivacyPolicy(mode="blocklist", blocklist=tuple(policy), allowlist=())
+
+
+def _matches_list(chat_id: str, sender: str, entries: tuple[str, ...] | list[str]) -> bool:
+    if not entries:
+        return False
+    cid = chat_id or ""
+    snd = sender or ""
+    cid_l10 = _last10(cid)
+    snd_l10 = _last10(snd)
+    for entry in entries:
+        entry_l10 = _last10(entry)
+        if entry_l10 and (entry_l10 == cid_l10 or entry_l10 == snd_l10):
+            return True
+        if not entry_l10:
+            lowered = entry.lower()
+            if "@" in entry and (lowered == cid.lower() or lowered == snd.lower()):
+                return True
+            if "@" not in entry and (lowered in cid.lower() or lowered in snd.lower()):
+                return True
+    return False
 
 
 def _last10(s: str) -> str:
@@ -390,22 +656,17 @@ def _last10(s: str) -> str:
     return d[-10:] if len(d) >= 10 else ""
 
 
-def is_blocked(chat_id: str, sender: str, blocklist: list[str]) -> bool:
-    cid = chat_id or ""
-    snd = sender or ""
-    cid_l10 = _last10(cid)
-    snd_l10 = _last10(snd)
-    for b in blocklist:
-        b_l10 = _last10(b)
-        if b_l10 and (b_l10 == cid_l10 or b_l10 == snd_l10):
-            return True
-        # Non-numeric blocklist entries match as case-insensitive substring
-        # against chat_id / sender (covers email handles and group IDs).
-        if not b_l10:
-            bl = b.lower()
-            if bl in cid.lower() or bl in snd.lower():
-                return True
-    return False
+def is_blocked(chat_id: str, sender: str, policy: PrivacyPolicy | list[str]) -> bool:
+    return _matches_list(chat_id, sender, _coerce_policy(policy).blocklist)
+
+
+def is_read_allowed(chat_id: str, sender: str, policy: PrivacyPolicy | list[str]) -> bool:
+    resolved = _coerce_policy(policy)
+    if is_blocked(chat_id, sender, resolved):
+        return False
+    if resolved.mode == "allowlist":
+        return bool(_matches_list(chat_id, sender, resolved.allowlist))
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -526,12 +787,42 @@ def validate_search(v: Any) -> str:
     return v
 
 
+_EMAIL_ATOM = r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
+_EMAIL_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_EMAIL_RE = re.compile(
+    rf"^{_EMAIL_ATOM}(?:\.{_EMAIL_ATOM})*@"
+    rf"{_EMAIL_LABEL}(?:\.{_EMAIL_LABEL})+$"
+)
+_PHONE_RE = re.compile(r"^[+0-9().\- ]+$")
+
+
 def validate_chat(v: Any) -> str:
     if not isinstance(v, str) or not v.strip():
         raise ValueError("chat identifier required")
     if len(v) > 200:
         raise ValueError("chat identifier too long")
     return v.strip()
+
+
+def validate_send_recipient(v: Any) -> str:
+    """Validate a send target. Accepts only phone numbers and email addresses.
+    Rejects all group chat IDs (any 'chat' prefix).
+    """
+    identifier = validate_chat(v)
+
+    if identifier.casefold().startswith("chat"):
+        raise ValueError("group chat IDs are not supported for sending; use a phone number or email")
+
+    if "@" in identifier:
+        if not _EMAIL_RE.fullmatch(identifier):
+            raise ValueError("send recipient must be a valid email address or phone number")
+        return identifier.strip().lower()
+
+    digits = re.sub(r"\D", "", identifier)
+    if len(digits) >= 10 and _PHONE_RE.fullmatch(identifier):
+        return identifier.strip()
+
+    raise ValueError("send recipient must be a valid phone number or email address")
 
 
 def validate_send_text(v: Any) -> str:
@@ -597,25 +888,75 @@ def _run_osascript(script: str, timeout: float = OSASCRIPT_TIMEOUT_S
     return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
 
 
+def _run_send_confirmation(
+    *, to: str, resolved_name: str, service: str, text: str
+) -> bool:
+    """Show the full outbound payload in the native confirmation helper.
+
+    Return True only for the helper's explicit Send exit status. Cancel and
+    timeout return False; malformed input or helper failures raise.
+    """
+    payload = json.dumps(
+        {
+            "client_name": HOST_DISPLAY_NAME,
+            "to": to,
+            "resolved_name": resolved_name,
+            "service": service,
+            "text": text,
+        },
+        ensure_ascii=False,
+    )
+    try:
+        result = subprocess.run(
+            [str(CONFIRM_HELPER_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=70,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    except OSError as e:
+        raise RuntimeError(f"confirmation helper could not start: {e}") from e
+
+    if result.returncode == 0:
+        return True
+    if result.returncode in (1, 3):
+        return False
+    detail = (result.stderr or result.stdout or "no output").strip()
+    raise RuntimeError(
+        f"confirmation helper failed (rc={result.returncode}): {detail}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # DB handling
 # ---------------------------------------------------------------------------
 def copy_chatdb() -> Path:
-    src = Path.home() / "Library" / "Messages" / "chat.db"
-    if not src.exists():
-        raise RuntimeError(f"chat.db not found at {src}")
+    if not CHAT_DB_PATH.exists():
+        raise RuntimeError(f"chat.db not found at {CHAT_DB_PATH}")
     fd, tmp = tempfile.mkstemp(prefix="cowork_imessage_", suffix=".db")
     os.close(fd)
-    shutil.copy2(src, tmp)
-    # WAL sidecars — copy if present so the snapshot is consistent.
-    for sidecar in ("-wal", "-shm"):
-        sc = Path(str(src) + sidecar)
-        if sc.exists():
-            try:
-                shutil.copy2(sc, tmp + sidecar)
-            except Exception as e:
-                log(f"sidecar {sidecar}: {e}")
-    return Path(tmp)
+    snapshot = Path(tmp)
+    source = None
+    destination = None
+    try:
+        # chat.db is live and may contain uncheckpointed WAL rows. Do not use
+        # immutable=1 here: it asserts the file cannot change and disables
+        # locking/change detection. The online backup API supplies the snapshot.
+        source_uri = f"{CHAT_DB_PATH.resolve().as_uri()}?mode=ro&cache=private"
+        source = sqlite3.connect(source_uri, uri=True, timeout=5)
+        destination = sqlite3.connect(str(snapshot))
+        source.backup(destination)
+        return snapshot
+    except Exception:
+        cleanup_tmpdb(snapshot)
+        raise
+    finally:
+        if destination is not None:
+            destination.close()
+        if source is not None:
+            source.close()
 
 
 def cleanup_tmpdb(path: Path) -> None:
@@ -695,8 +1036,25 @@ def fetch_messages(
     return out
 
 
+def apply_read_policy(
+    msgs: list[dict], policy: PrivacyPolicy | list[str]
+) -> list[dict]:
+    return [m for m in msgs if is_read_allowed(m["chat_id"], m["sender"], policy)]
+
+
 def apply_blocklist(msgs: list[dict], blocklist: list[str]) -> list[dict]:
-    return [m for m in msgs if not is_blocked(m["chat_id"], m["sender"], blocklist)]
+    """Backward-compatible alias for blocklist-only callers."""
+    return apply_read_policy(msgs, blocklist)
+
+
+def filter_contacts(
+    contacts: dict[str, str], policy: PrivacyPolicy | list[str]
+) -> dict[str, str]:
+    return {
+        handle: name
+        for handle, name in contacts.items()
+        if is_read_allowed(handle, handle, policy)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -796,11 +1154,11 @@ def classify_chats(
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
-def action_review(params, conn, contacts, blocklist):
+def action_review(params, conn, contacts, privacy_policy):
     days = validate_days(params.get("days", 2))
     cutoff_ns = to_apple_ns(time.time() - days * 86400)
     msgs = fetch_messages(conn, cutoff_ns)
-    msgs = apply_blocklist(msgs, blocklist)
+    msgs = apply_read_policy(msgs, privacy_policy)
     participants = load_chat_participants(conn)
     needs_reply, low_priority, skip = classify_chats(msgs, contacts, participants)
     return {
@@ -822,13 +1180,15 @@ def action_review(params, conn, contacts, blocklist):
     }
 
 
-def action_search(params, conn, contacts, blocklist):
+def action_search(params, conn, contacts, privacy_policy):
     term = validate_search(params.get("term"))
     days = validate_days(params.get("days", 30))
     limit = validate_limit(params.get("limit", 100))
     cutoff_ns = to_apple_ns(time.time() - days * 86400)
     msgs = fetch_messages(conn, cutoff_ns, search=term)
-    msgs = apply_blocklist(msgs, blocklist)
+    msgs = apply_read_policy(msgs, privacy_policy)
+    # Sort descending by timestamp so newest matches come first.
+    msgs.sort(key=lambda x: x["ts_ns"], reverse=True)
     matches = []
     for m in msgs[:limit]:
         name = lookup_name(m["chat_id"], m["sender"], contacts)
@@ -844,19 +1204,20 @@ def action_search(params, conn, contacts, blocklist):
     return {"term": term, "days": days, "match_count": len(matches), "matches": matches}
 
 
-def action_chat_history(params, conn, contacts, blocklist):
+def action_chat_history(params, conn, contacts, privacy_policy):
     chat_q = validate_chat(params.get("chat"))
     days = validate_days(params.get("days", 14))
     limit = validate_limit(params.get("limit", 100))
-    substr = resolve_chat_filter(chat_q, contacts)
+    visible_contacts = filter_contacts(contacts, privacy_policy)
+    substr = resolve_chat_filter(chat_q, visible_contacts)
     cutoff_ns = to_apple_ns(time.time() - days * 86400)
     msgs = fetch_messages(conn, cutoff_ns, chat_filter_substr=substr)
-    msgs = apply_blocklist(msgs, blocklist)
+    msgs = apply_read_policy(msgs, privacy_policy)
     msgs.sort(key=lambda x: x["ts_ns"])
     msgs = msgs[-limit:]
     out = []
     for m in msgs:
-        name = lookup_name(m["chat_id"], m["sender"], contacts)
+        name = lookup_name(m["chat_id"], m["sender"], visible_contacts)
         out.append(
             {
                 "chat_id": m["chat_id"],
@@ -869,13 +1230,13 @@ def action_chat_history(params, conn, contacts, blocklist):
     return {"chat_query": chat_q, "resolved_substr": substr, "count": len(out), "messages": out}
 
 
-def action_response_stats(params, conn, contacts, blocklist):
+def action_response_stats(params, conn, contacts, privacy_policy):
     chat_q = validate_chat(params.get("chat"))
     hours = validate_hours(params.get("hours", 24))
-    substr = resolve_chat_filter(chat_q, contacts)
+    substr = resolve_chat_filter(chat_q, filter_contacts(contacts, privacy_policy))
     cutoff_ns = to_apple_ns(time.time() - hours * 3600)
     msgs = fetch_messages(conn, cutoff_ns, chat_filter_substr=substr)
-    msgs = apply_blocklist(msgs, blocklist)
+    msgs = apply_read_policy(msgs, privacy_policy)
     msgs.sort(key=lambda x: x["ts_ns"])
 
     deltas: list[float] = []
@@ -919,33 +1280,72 @@ def action_response_stats(params, conn, contacts, blocklist):
     }
 
 
-def action_contacts_lookup(params, conn, contacts, blocklist):
+def action_contacts_lookup(params, conn, contacts, privacy_policy):
     name = params.get("name", "")
     if not isinstance(name, str) or not name.strip() or len(name) > 100:
         raise ValueError("name must be a 1..100 char string")
     nl = name.lower()
     matches = []
-    for digits, full_name in contacts.items():
+    for handle, full_name in contacts.items():
+        if not is_read_allowed(handle, handle, privacy_policy):
+            continue
         if nl in full_name.lower():
-            matches.append({"name": full_name, "phone_last10": digits})
+            if "@" in handle:
+                matches.append({"name": full_name, "email": handle})
+            else:
+                matches.append({"name": full_name, "phone_last10": handle})
     return {"query": name, "match_count": len(matches), "matches": matches[:25]}
+
+
+def action_status(params, conn, contacts, privacy_policy):
+    """Return compatibility and local-install status without reading messages."""
+    policy = _coerce_policy(privacy_policy)
+    return {
+        "helper_version": HELPER_VERSION,
+        "protocol_version": PROTOCOL_VERSION,
+        "product_id": "claudecowork-imessage",
+        "host_display_name": HOST_DISPLAY_NAME,
+        "launchd_label": "com.jeffhuber.claudecowork-imessage",
+        "code_root": str(CODE_ROOT),
+        "bridge_root": str(BRIDGE_ROOT),
+        "install_root": str(CODE_ROOT),
+        "python_version": sys.version.split()[0],
+        "read_policy": {
+            "mode": policy.mode,
+            "allowlist_entries": len(policy.allowlist),
+            "blocklist_entries": len(policy.blocklist),
+            "root_owned_required": os.environ.get("COWORK_IMESSAGE_REQUIRE_ROOT_POLICY") == "1",
+        },
+        "checks": {
+            "chat_db_exists": CHAT_DB_PATH.is_file(),
+            "chat_db_readable": os.access(CHAT_DB_PATH, os.R_OK),
+            "confirmation_helper_exists": CONFIRM_HELPER_PATH.is_file(),
+            "confirmation_helper_executable": os.access(CONFIRM_HELPER_PATH, os.X_OK),
+            "requests_dir_exists": REQUESTS_DIR.is_dir(),
+            "responses_dir_exists": RESPONSES_DIR.is_dir(),
+        },
+    }
+
+
+action_status.needs_db = False  # type: ignore[attr-defined]
+action_status.needs_contacts = False  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
 # Send actions (AppleScript-driven)
 # ---------------------------------------------------------------------------
 def _resolve_contact_name(to: str, contacts: dict[str, str]) -> str:
-    """Best-effort name lookup from phone-shaped targets.
+    """Best-effort name lookup from phone or email targets.
 
-    Emails and group-chat IDs return "" — not because we couldn't look
+    Group-chat IDs return "" — not because we couldn't look
     them up, but because the Contacts-side loader keys on normalized
-    10-digit phone numbers only.
+    phone numbers and emails only.
     """
-    key = _last10(to)
+    key = _normalize_handle(to)
     return contacts.get(key, "") if key else ""
 
 
-def action_send_preview(params, conn, contacts, blocklist):
+def action_send_preview(params, conn, contacts, privacy_policy):
     """Non-destructive: resolve the recipient and return what *would* be sent.
 
     Intended flow — the agent calls `send_preview` first, shows the preview
@@ -957,20 +1357,25 @@ def action_send_preview(params, conn, contacts, blocklist):
     that skips preview — or swaps the body between preview and send — is
     rejected helper-side.
     """
-    to = validate_chat(params.get("to"))
+    to = validate_send_recipient(params.get("to"))
     text = validate_send_text(params.get("text"))
     service = validate_service(params.get("service"))
 
     send_nonce = mint_send_nonce(to, text, service)
 
+    resolved_name = (
+        _resolve_contact_name(to, contacts)
+        if is_read_allowed(to, to, privacy_policy)
+        else ""
+    )
     return {
         "preview": {
             "to": to,
-            "resolved_name": _resolve_contact_name(to, contacts),
+            "resolved_name": resolved_name,
             "service": service,
             "text": text,
             "text_length": len(text),
-            "blocked": is_blocked(to, to, blocklist),
+            "blocked": is_blocked(to, to, privacy_policy),
         },
         "send_nonce": send_nonce,
         "send_nonce_ttl_seconds": SEND_NONCE_TTL,
@@ -980,7 +1385,7 @@ def action_send_preview(params, conn, contacts, blocklist):
 action_send_preview.needs_db = False  # type: ignore[attr-defined]
 
 
-def action_send(params, conn, contacts, blocklist):
+def action_send(params, conn, contacts, privacy_policy):
     """Send an iMessage (or SMS via iPhone relay) via AppleScript.
 
     The message body is written to a tempfile and read by AppleScript as
@@ -988,17 +1393,17 @@ def action_send(params, conn, contacts, blocklist):
     send arbitrary Unicode (including emoji and newlines) unchanged.
 
     Recipient identifiers are escaped inline as AppleScript string literals
-    because they've already passed `validate_chat` (≤200 chars, stripped).
+    because they've already passed `validate_send_recipient` (≤200 chars, stripped).
 
     The `service type` slot is an AppleScript enum, not a string. We pick
     the clause statically from the validated service name so no untrusted
     input is ever interpolated into that slot.
     """
-    to = validate_chat(params.get("to"))
+    to = validate_send_recipient(params.get("to"))
     text = validate_send_text(params.get("text"))
     service = validate_service(params.get("service"))
 
-    if is_blocked(to, to, blocklist):
+    if is_blocked(to, to, privacy_policy):
         raise ValueError(
             f"refusing to send: {to!r} is in contacts/blocked_chats.txt"
         )
@@ -1009,6 +1414,21 @@ def action_send(params, conn, contacts, blocklist):
     # enforces preview-then-confirm even if the bridge has been bypassed
     # by some process writing directly into control/requests/.
     consume_send_nonce(params.get("send_nonce"), to, text, service)
+
+    # Require explicit human approval before AppleScript sends. The native
+    # helper shows both the resolved and raw recipient plus the complete body
+    # in a scrollable view. Cancel is the keyboard default and all unexpected
+    # outcomes fail closed.
+    resolved_name = _resolve_contact_name(to, contacts)
+    if not _run_send_confirmation(
+        to=to,
+        resolved_name=resolved_name,
+        service=service,
+        text=text,
+    ):
+        raise RuntimeError(
+            "send cancelled by user or timed out (60s dialog limit)"
+        )
 
     if service == "iMessage":
         svc_clause = "1st service whose service type = iMessage"
@@ -1059,6 +1479,7 @@ action_send.needs_db = False  # type: ignore[attr-defined]
 
 
 ACTIONS = {
+    "status": action_status,
     "review": action_review,
     "search": action_search,
     "chat_history": action_chat_history,
@@ -1072,29 +1493,150 @@ ACTIONS = {
 # ---------------------------------------------------------------------------
 # Request / response plumbing
 # ---------------------------------------------------------------------------
-def write_response(req_id: str, data: dict) -> None:
-    RESPONSES_DIR.mkdir(parents=True, exist_ok=True)
-    path = RESPONSES_DIR / f"response-{req_id}.json"
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+def write_response(req_filename_stem: str, data: dict) -> None:
+    """Write response JSON atomically. Uses the request filename stem to
+    derive the response filename, never trusting JSON id for the path.
+    """
+    if not req_filename_stem or "/" in req_filename_stem or req_filename_stem in (".", ".."):
+        raise ValueError("invalid response filename stem")
+    name = f"response-{req_filename_stem}.json"
+    tmp = f".{name}.{uuid.uuid4().hex}.tmp"
+    with _private_directory_fd(RESPONSES_DIR, create=True) as responses_fd:
+        fd = os.open(
+            tmp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_NOFOLLOW_FLAGS,
+            0o600,
+            dir_fd=responses_fd,
+        )
+        try:
+            _validate_regular_file(fd, tmp, private=True)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = -1
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, name, src_dir_fd=responses_fd, dst_dir_fd=responses_fd)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(tmp, dir_fd=responses_fd)
+            except FileNotFoundError:
+                pass
 
 
-def process_request(req_path: Path, blocklist: list[str]) -> None:
+def reap_expired_responses() -> None:
+    """Remove response payloads that the host failed to consume promptly."""
+    now = time.time()
     try:
-        raw = req_path.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except Exception as e:
-        req_id = req_path.stem.replace("request-", "") or str(uuid.uuid4())
-        write_response(req_id, {"ok": False, "error": f"bad request JSON: {e}"})
+        with _private_directory_fd(RESPONSES_DIR) as responses_fd:
+            for name in os.listdir(responses_fd):
+                if not (name.startswith("response-") and name.endswith(".json")):
+                    continue
+                try:
+                    # Legacy releases may have left broader file modes. The
+                    # containing directory is private; unlinking a verified
+                    # regular, current-user-owned file does not follow it.
+                    metadata = _stat_regular_at(responses_fd, name)
+                    if now - metadata.st_mtime > RESPONSE_TTL_S:
+                        os.unlink(name, dir_fd=responses_fd)
+                except (OSError, UnsafeRuntimePath) as e:
+                    log(f"response reaper could not remove {name}: {e}")
+    except UnsafeRuntimePath as e:
+        if isinstance(e.__cause__, FileNotFoundError):
+            return
+        raise
+
+
+def _read_request_text(req_path: Path, requests_fd: int | None) -> str:
+    if requests_fd is None:
+        fd = os.open(req_path, os.O_RDONLY | _FILE_NOFOLLOW_FLAGS)
+    else:
+        fd = os.open(
+            req_path.name,
+            os.O_RDONLY | _FILE_NOFOLLOW_FLAGS,
+            dir_fd=requests_fd,
+        )
+    try:
+        metadata = _validate_regular_file(fd, str(req_path))
+        if metadata.st_size > MAX_REQUEST_BYTES:
+            raise ValueError(f"request exceeds {MAX_REQUEST_BYTES} byte limit")
+        chunks: list[bytes] = []
+        remaining = MAX_REQUEST_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(remaining, 8192))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > MAX_REQUEST_BYTES:
+            raise ValueError(f"request exceeds {MAX_REQUEST_BYTES} byte limit")
+        return raw.decode("utf-8")
+    finally:
+        os.close(fd)
+
+
+def _bad_request(req_stem: str, error: str, *, req_id: str | None = None) -> None:
+    response: dict[str, Any] = {"ok": False, "error": error}
+    if req_id is not None:
+        response["id"] = req_id
+    write_response(req_stem, response)
+
+
+def process_request(
+    req_path: Path,
+    privacy_policy: PrivacyPolicy | list[str],
+    *,
+    requests_fd: int | None = None,
+) -> None:
+    # Derive safe response filename from request filename stem only.
+    # Never use JSON id field for filesystem paths — it could contain slashes.
+    req_stem = req_path.stem.replace("request-", "")
+    if not req_stem:
+        log(f"skipping malformed request filename: {req_path.name}")
         return
 
-    req_id = str(data.get("id") or req_path.stem.replace("request-", "") or uuid.uuid4())
+    # Ignore incomplete files: *.tmp, *.partial, names starting with .
+    if (req_path.suffix in (".tmp", ".partial") or
+        req_path.name.startswith(".") or
+        req_path.name.startswith("request-") and not req_path.name.endswith(".json")):
+        return
+
+    try:
+        raw = _read_request_text(req_path, requests_fd)
+    except Exception as e:
+        _bad_request(req_stem, f"bad request file: {e}")
+        return
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        # Preserve compatibility with non-atomic clients by retrying malformed
+        # JSON once. Secure descriptor-relative opens still reject symlinks.
+        time.sleep(0.1)
+        try:
+            raw = _read_request_text(req_path, requests_fd)
+            data = json.loads(raw)
+        except Exception as e:
+            _bad_request(req_stem, f"bad request JSON: {e}")
+            return
+
+    if not isinstance(data, dict):
+        _bad_request(req_stem, "bad request: JSON root must be an object")
+        return
+
+    # Echo back the JSON id in response, but never use it for filesystem paths.
+    req_id = str(data.get("id", req_stem))
     action = data.get("action")
-    params = data.get("params", {}) or {}
+    params = data.get("params", {})
+
+    if not isinstance(action, str):
+        _bad_request(req_stem, "bad request: action must be a string", req_id=req_id)
+        return
+    if not isinstance(params, dict):
+        _bad_request(req_stem, "bad request: params must be an object", req_id=req_id)
+        return
 
     if action not in ACTIONS:
-        write_response(req_id, {
+        write_response(req_stem, {
             "id": req_id,
             "ok": False,
             "error": f"unknown action: {action!r}",
@@ -1113,17 +1655,18 @@ def process_request(req_path: Path, blocklist: list[str]) -> None:
             db_path = copy_chatdb()
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             conn.text_factory = bytes
-        contacts = load_contacts()
-        result = action_fn(params, conn, contacts, blocklist)
+        needs_contacts = getattr(action_fn, "needs_contacts", True)
+        contacts = load_contacts() if needs_contacts else {}
+        result = action_fn(params, conn, contacts, privacy_policy)
         if conn is not None:
             conn.close()
         result.update({"id": req_id, "action": action, "ok": True,
                        "generated_at": datetime.now().isoformat(timespec="seconds")})
-        write_response(req_id, result)
+        write_response(req_stem, result)
     except Exception as e:
         log(f"action={action} id={req_id} error: {e!r}")
         log(traceback.format_exc())
-        write_response(req_id, {
+        write_response(req_stem, {
             "id": req_id, "action": action, "ok": False, "error": str(e),
         })
     finally:
@@ -1132,31 +1675,48 @@ def process_request(req_path: Path, blocklist: list[str]) -> None:
 
 
 def main() -> None:
-    REQUESTS_DIR.mkdir(parents=True, exist_ok=True)
-    RESPONSES_DIR.mkdir(parents=True, exist_ok=True)
-    blocklist = load_blocklist()
+    for path in (LOG_PATH.parent, REQUESTS_DIR, RESPONSES_DIR):
+        with _private_directory_fd(path, create=True):
+            pass
+    privacy_policy = load_privacy_policy()
+
+    reap_expired_responses()
 
     # v0.4.0+: garbage-collect stale send nonces from previews that never
-    # got a matching send (user cancelled, Claude crashed). Cheap; touches
-    # only ~/cowork-imessage/nonces/ and only a few files at most.
+    # got a matching send (user cancelled, the host stopped before sending). Cheap; touches
+    # only ~/imessage-bridge/nonces/ and only a few files at most.
     try:
         reap_expired_nonces()
     except Exception as e:
         log(f"reap_expired_nonces error: {e!r}")
 
-    pending = sorted(REQUESTS_DIR.glob("request-*.json"))
-    if not pending:
-        # launchd sometimes fires with no new file (e.g. directory-touch).
-        return
+    # Only process complete request files (*.json, not temp/partial suffixes).
+    with _private_directory_fd(REQUESTS_DIR) as requests_fd:
+        pending = sorted(
+            name
+            for name in os.listdir(requests_fd)
+            if name.startswith("request-") and name.endswith(".json")
+        )
+        if not pending:
+            # launchd sometimes fires with no new file (e.g. directory-touch).
+            return
 
-    for p in pending:
-        try:
-            process_request(p, blocklist)
-        finally:
+        for name in pending:
+            request = Path(name)
+            req_stem = request.stem.replace("request-", "")
             try:
-                p.unlink()
+                process_request(request, privacy_policy, requests_fd=requests_fd)
             except Exception as e:
-                log(f"could not unlink {p.name}: {e}")
+                log(f"request={name} unhandled error: {e!r}")
+                try:
+                    _bad_request(req_stem, f"request processing failed: {e}")
+                except Exception as response_error:
+                    log(f"request={name} could not write error response: {response_error!r}")
+            finally:
+                try:
+                    os.unlink(name, dir_fd=requests_fd)
+                except Exception as e:
+                    log(f"could not unlink {name}: {e}")
 
 
 if __name__ == "__main__":
