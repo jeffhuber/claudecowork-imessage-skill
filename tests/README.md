@@ -31,6 +31,10 @@ validation functions.
 | `test_validation.py` | Request-parameter validators — bounds checking, type coercion, rejection of malformed input, action whitelist enforcement. |
 | `test_send.py` | `send_preview` and `send` actions — text / service validators, AppleScript string escaping, tempfile lifecycle, blocklist-respect on outbound, `needs_db` short-circuit for send actions. Also covers the v0.4.0+ helper-side send gate: `action_send` refusing missing / bogus / mismatched / replayed nonces, and the preview-then-send round trip. `osascript` is mocked; no real messages go out during the test run. |
 | `test_send_gate.py` | The nonce gate in isolation (`send_gate.py`) — mint/consume round-trip, single-use semantics, payload binding, TTL expiry, path-traversal rejection, and the reaper. (v0.4.0+) |
+| `test_safety_privacy.py` | Native confirmation behavior, private atomic responses and logs, retention, symlink refusal, runtime directory modes, and LaunchAgent stdio privacy. |
+| `test_hardened_architecture.py` | Default-deny read policy, root-owned policy requirements, wrapper component validation, hardened installer flags, and code/runtime root separation. |
+| `test_installation_identity.py` | Complete bootstrap packaging, host-specific identities, exact legacy migration, scoped uninstall, and disjoint Claude/Grok resource contracts. |
+| `test_reliability.py` | SQLite WAL-consistent snapshots, host-specific status metadata, malformed/oversized/FIFO queue isolation, request-symlink refusal, and doctor failure output. |
 
 ## What's NOT covered
 

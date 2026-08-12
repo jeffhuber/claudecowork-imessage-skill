@@ -1,27 +1,28 @@
 # Security
 
-This document describes what `imessage-review` does with your Mac's
+This document describes what the `claudecowork-imessage-skill` helper does with your Mac's
 permissions, the trust boundaries it relies on, and what to do if you
 find a vulnerability.
 
 It is written to be specific about limitations rather than reassuring.
 If something below sounds too permissive for your threat model, don't
-install the plugin.
+install the helper.
 
-## What this plugin does
+## What this project does
 
-`imessage-review` is a Claude Cowork plugin that:
+`claudecowork-imessage-skill` is an iMessage integration for Claude Cowork (and compatible AI assistants) that:
 
 - Reads your local Messages database (`~/Library/Messages/chat.db`) so
-  Claude can search, summarize, and surface messages that need a reply.
-- Optionally sends iMessages on your behalf, gated behind an in-Cowork
+  your AI assistant can search, summarize, and surface messages that need
+  a reply.
+- Optionally sends iMessages on your behalf, gated behind a
   preview-and-confirm step.
 
 Both paths go through a single on-device helper process: a Python
-script (`helper.py`) launched by an ad-hoc-signed C wrapper via a
-user-scoped `launchd` LaunchAgent. The C wrapper exists solely to give
-the helper a stable `CDHash`, which is what macOS TCC uses to identify
-the process holding Full Disk Access.
+script (`helper.py`) launched by a locally signed C wrapper via a
+user-scoped `launchd` LaunchAgent. The C wrapper gives the helper a stable
+`CDHash`, validates the executable components and policy configuration, and
+sets a minimal environment before Python starts.
 
 ## Permissions required, and what each one actually grants
 
@@ -39,24 +40,23 @@ to read:
   `Library/Application Support/*`).
 - Any user file that isn't itself TCC-gated.
 
-The plugin *code* only reads `chat.db`. But a bug or compromise in
-the helper becomes a full-user-file-read primitive, not just a
-Messages leak. Treat that as the blast radius.
+The read path targets `chat.db` plus local Contacts data used for name
+resolution. But a bug or compromise in the helper becomes a
+full-user-file-read primitive, not just a Messages leak. Treat that as the
+blast radius.
 
 ### The CDHash pins the wrapper, not the Python
 
-The TCC grant for Full Disk Access is bound to the C wrapper's
-CDHash. That stabilizes the grant across OS updates that would
-otherwise re-hash `/usr/bin/python3`, but it does not extend any
-authentication to `helper.py` itself. The wrapper's one and only job
-is to `exec` `helper.py`, and `helper.py` lives in the user-writable
-bridge folder (`~/cowork-imessage/bin/helper.py`, mode 600 but owned
-by you).
+The TCC grant is bound to the wrapper's CDHash. The wrapper therefore validates
+every project file it loads before `exec`: `helper.py`, `send_gate.py`, and the
+native confirmation helper must be regular files, have the expected owner, and
+not be group/world writable. It rejects symlinks. The confirmation helper must
+also be executable.
 
-That means any process running as your user with write access to the
-bridge folder can overwrite `helper.py` with its own Python, and the
-very next `launchd` trigger will run that replacement under the
-wrapper's CDHash and inherit FDA. A tampered `helper.py` would:
+The **standard installer** keeps code in the user-owned bridge. A same-user
+process can replace a file with another file that still has the expected user
+owner and permissions, so this mode remains vulnerable to code replacement. A
+tampered helper could:
 
 - Bypass the v0.4.0 helper-side send gate — a replacement simply
   wouldn't check nonces.
@@ -66,19 +66,27 @@ wrapper's CDHash and inherit FDA. A tampered `helper.py` would:
   otherwise), because authentication is enforced by the helper, and
   the helper has been replaced.
 
-This is the same threat class covered by the "malicious supply-chain
-packages running as your user" caveat below — a process that can
-write into your `$HOME` can compromise the plugin by replacing
-`helper.py`, full stop. The helper-side gates are defense in depth
-against accidents and unsophisticated attackers; they are not a
-barrier against an attacker with user-UID write access to the bridge
-folder.
+The **hardened installer** puts code under root-owned
+`/Library/Application Support/ClaudeCoworkIMessage/users/<uid>/libexec` and compiles the wrapper
+to require UID 0 ownership for all loaded code. Runtime queues remain
+user-owned. This prevents an ordinary same-user process from replacing trusted
+code, although administrator/root compromise remains out of scope.
 
-A stricter posture — installing `helper.py` to a root-owned path
-like `/usr/local/libexec/cowork-imessage/helper.py` via `sudo` in
-`install.sh` — is a plausible future mitigation but is not currently
-shipped. Until then, treat the bridge folder as part of the trusted
-compute base: if something can write there, it owns the helper.
+The FDA-bearing Python process opens the bridge path component-by-component
+with `O_NOFOLLOW`, then performs request, response, log, and nonce operations
+relative to verified directory descriptors. The bridge and runtime directories
+must be owned by the current user with no group/world permissions. Existing
+unsafe objects are rejected rather than chmodded. Request files must be regular
+and current-user-owned; nonce files must additionally be mode `600`. Request
+payloads are capped at 64 KiB.
+The LaunchAgent sends process stdout/stderr to `/dev/null`, leaving structured
+helper diagnostics to the same descriptor-relative internal logger.
+
+The Claude Cowork installation has its own LaunchAgent, plist, executable names,
+bridge, and hardened code root. The sibling Grok Bot helper can therefore run at
+the same time without sharing request queues, policy files, responses, logs, or
+nonces. Both helpers still rely on the same macOS Messages database and
+Messages Automation surface.
 
 ### Automation → Messages (v0.3.0+)
 
@@ -98,16 +106,12 @@ group-chat creation — those aren't in the AppleScript surface.
 
 ## Trust boundaries
 
-The helper communicates with Claude via a **bridge folder** — a
-mode-700 directory under the user's home directory (`~/cowork-imessage/`)
-where the client writes request files and the helper writes response
+The helper communicates with Claude Cowork (or other AI hosts) via a **bridge folder** — a
+mode-700 directory under the user's home directory (e.g., `~/imessage-bridge/`)
+where the AI writes request files and the helper writes response
 files. `launchd`'s `WatchPaths` triggers the helper on change.
 
 This is the primary trust boundary you need to understand.
-
-Claude and Grok installations use distinct LaunchAgents, executables, bridge
-folders, policy files, responses, logs, and nonces. They can run concurrently,
-but must not be configured to share one bridge queue.
 
 **What the bridge folder protects against:**
 
@@ -120,61 +124,83 @@ but must not be configured to share one bridge queue.
 - Any unsandboxed process running as your user. If you run a malicious
   `npm install`, `pip install`, `brew install`, or anything else that
   executes as your UID, that process can:
-  - Write a read request into the bridge folder and receive message
-    contents in response.
-  - Write a `send` request. **(See the confirmation gate section below
-    — since v0.4.0 a lone `send` request without a preceding preview is
-    rejected helper-side. The attacker would also have to forge a
-    `send_preview` that shows up in Claude's UI, or race the 60-second
-    window after a real one.)**
+  - Write a read request into the bridge folder. In standard mode it can receive
+    any non-blocked content; hardened mode limits results to the root-owned
+    allowlist.
+  - Issue a `send_preview` request, read its nonce, and issue the matching
+    `send` request. This can reach the native confirmation dialog, but it
+    cannot silently send: the user must still review the displayed
+    recipient and message and click **Send**.
 
-This is the central limitation of the current design on the **read**
-path: a process running as your user can exfiltrate message content.
-An HMAC-authenticated envelope that binds request files to a
-per-install key is planned for v0.4.1. If your threat model includes
-malicious supply-chain packages running as your user, do not install
-this plugin in its current form.
+Read requests are not tied to an interactive user session. Hardened mode narrows
+the maximum disclosure to explicitly allowlisted chats, but any same-user process
+can request and consume data from those chats. Do not allowlist conversations
+whose disclosure to another local process would be unacceptable.
 
 ## Confirmation gate (sending)
 
-Sending is confirmation-gated via a preview/confirm protocol:
+Sending is confirmation-gated via a two-layer preview/confirm protocol:
 
-1. The client asks the helper for a `send_preview` — the helper does
+**Layer 1: Nonce validation (v0.4.0+)**
+
+1. The AI asks the helper for a `send_preview` — the helper does
    NOT send; it echoes back the normalized payload and mints a
    one-shot **send nonce** bound to exactly that `(to, text, service)`
    triple.
-2. Claude shows the preview to you; you approve.
-3. The client asks the helper to `send`, passing the nonce from step 1.
+2. Claude Cowork shows the preview to you in chat; you approve.
+3. The AI asks the helper to `send`, passing the nonce from step 1.
    The helper recomputes the payload hash, compares it to the nonce's
-   stored hash, and only then calls `osascript`.
+   stored hash.
 
-As of **v0.4.0** this gate is enforced **helper-side**. A process that
-writes directly to the bridge folder and issues a `send` with no nonce,
-a forged nonce, a replayed (already-consumed) nonce, an expired nonce
-(TTL is 60 seconds), or a nonce whose bound payload differs from the
-`send` request's `(to, text, service)` is rejected before `osascript`
-runs. Nonces are stored as per-file records under
-`~/cowork-imessage/nonces/` (mode 600), are single-use (deleted on
-consume), and are also deleted on any validation failure so the same
-nonce cannot be retried with a corrected payload. An attacker who can
-write to the bridge folder would need to race a real, user-approved
-preview inside its 60-second window *and* send the exact same payload
-the user saw — they cannot silently swap the recipient or body.
+**Layer 2: Native macOS dialog (v1.0.0+)**
 
-The v0.3.x client-side check still runs as well; the helper-side gate
-is defense in depth, not a replacement.
+4. After nonce validation succeeds, the helper displays a **native macOS
+   system dialog** showing:
+   - Recipient (resolved contact name and exact phone/email)
+   - Service (iMessage or SMS)
+   - Full message text in a scrollable, read-only view
+5. Cancel is the keyboard default. You must deliberately select **Send** to proceed. Clicking **Cancel** or waiting
+   60 seconds aborts the send.
+6. Only after the dialog is confirmed does the helper call `osascript`
+   to send.
 
-## Blocklist
+This two-layer gate is enforced **helper-side**. A process that writes
+directly to the bridge folder and issues a `send` with no nonce, a forged
+nonce, a replayed (already-consumed) nonce, an expired nonce (TTL is 60
+seconds), or a nonce whose bound payload differs from the `send` request's
+`(to, text, service)` is rejected before the dialog appears. Nonces are stored as per-file records under `<bridge-folder>/nonces/`; the nonce directory is mode `700` and nonce files are mode `600`. Nonces are single-use (deleted on consume) and are also deleted on validation failure so the same nonce cannot be retried with a corrected payload.
+
+An attacker who can write to and read from the bridge can mint its own preview
+nonce; the nonce is not an authorization boundary against that attacker. It
+still prevents a blind one-request send, replay, or swapping the payload after a
+preview. To complete any attacker-created send, the victim must deliberately
+click **Send** in the native dialog showing the exact recipient, service, and
+complete message body. Unexpected dialogs should always be cancelled.
+
+The v0.3.x AI-side check still runs as well; the helper-side nonce gate
+and native dialog are defense in depth, not a replacement.
+
+**Behavior change for existing installations:** Releases v0.4.0 and earlier do
+not show the native dialog. Version 1.1.0 adds this independent confirmation.
+
+## Read policy
 
 `contacts/blocked_chats.txt` is checked by the helper before any read
 or send involving a listed identifier. The list is editable by the
 user and is honored for both inbound (search/review) and outbound
 (send) as of v0.3.0.
 
-The blocklist is best-effort. It is not a privacy boundary — anyone
+The standard-mode blocklist is best-effort. It is not a privacy boundary — anyone
 who can edit the file can also remove entries, and the helper trusts
 the list verbatim. Use it to prevent accidental exposure, not as a
 security control.
+
+Hardened mode bakes `allowlist` into the wrapper and validates a root-owned,
+mode-600 allowlist under the same root-owned per-UID product tree.
+The user receives read-only ACL access; changes go through `sudo` via
+`configure_allowlist.py`. A missing, symlinked, writable, or non-root-owned file
+causes the wrapper/helper to fail closed. The user-editable blocklist still takes
+precedence.
 
 ## What leaves the machine
 
@@ -182,28 +208,38 @@ The helper itself does not make any outbound network connections. All
 message content read from `chat.db` or sent via AppleScript is
 processed on-device by the helper.
 
-When Claude Cowork uses the plugin, message content that Claude reads
-passes through Claude's normal pipeline, which means it reaches
+When Claude Cowork uses this skill, message content that Claude Cowork reads
+passes through Anthropic's normal pipeline, which means it reaches
 Anthropic's servers as part of the conversation, subject to
 Anthropic's standard data-handling terms. If you don't want a specific
 conversation touched, add the identifier to the blocklist or don't
-invoke the skill on that range.
+invoke the skill on that range. Hardened users should allow only the minimum set
+of conversations needed.
 
 The plugin does **not**:
 
 - Send telemetry.
 - Phone home.
 - Auto-update.
-- Log message content to disk outside of the short-lived `chat.db`
-  copy used for reads (see below).
+- Log message bodies or raw attributed-body bytes.
+
+Response JSON can contain message content. Clients are required to delete each
+response immediately after parsing it, and the helper reaps abandoned responses
+after one hour. Response files and `control/log.txt` are mode `600`; parser logs
+record only failure metadata and byte counts, never raw message bytes. Logs
+rotate at 1 MiB with three backups.
+
+Runtime paths are deliberately fail-closed. A symlink, FIFO, device, wrong
+owner, or permissive directory causes that operation to be rejected; the helper
+does not follow or repair the object. Run `tools/doctor.py` and rerun the chosen
+installer to restore an expected directory layout.
 
 ## The chat.db copy
 
-SQLite locks `chat.db` while Messages.app has it open, so the helper
-copies it to a per-request tempfile under the user's cache directory,
-reads the copy, and deletes it at the end of the request. The copy is
-mode-600 and is cleaned up on normal exit; an abnormal exit (OOM,
-SIGKILL) can leave a stale copy behind.
+The helper uses SQLite's online backup API to create a consistent per-request
+snapshot while Messages may still be writing to `chat.db`. It reads the
+mode-600 snapshot and deletes it at the end of the request. An abnormal exit
+(OOM or SIGKILL) can leave a stale copy behind.
 
 `send` actions do NOT copy `chat.db` — a `needs_db` flag on each
 request handler short-circuits the copy for write-only operations.
@@ -233,41 +269,42 @@ stable:
 Either could be deprecated in a future macOS release. If that
 happens, this plugin will need to be rewritten or will stop working.
 
-## Auditing this plugin
+## Auditing this helper
 
 You can verify what's actually on your disk:
 
-- The `.plugin` bundle is a flat zip. Unzip it and read
-  `skills/imessage-review/helper.py` — it's pure Python and the only
-  thing that runs with FDA + Automation-over-Messages.
-- The C wrapper source is in the bundle. It does approximately
-  nothing — it exists to stabilize the CDHash. You can rebuild it
-  yourself; the README documents the one-line `clang` command.
-- Verify the released `.plugin` matches the source on GitHub. Each
-  GitHub release attaches the bundle; the file is small enough to
-  diff against a local clone.
-- After install, verify the plugin's LaunchAgent plist under
-  `~/Library/LaunchAgents/` points only at the wrapper in the bridge
-  folder and carries no other arguments.
+- All source is in this repository under `skills/imessage-review/`. Read
+  `bin/helper.py` and `bin/send_gate.py`; they run inside the FDA-granted Python
+  process. The native confirmation source is `bin/confirm_imessage_send.m`.
+- The C wrapper source is `bin/cowork_imessage_helper.c`. It stabilizes the
+  CDHash, validates every executable component and policy path, sets a minimal
+  environment, and then executes Python.
+- Verify the repository contents match a tagged GitHub release. Release source
+  archives include a `SHA256SUMS` file, and the source is small enough to diff
+  against a local clone.
+- After install, verify the LaunchAgent plist under
+  `~/Library/LaunchAgents/com.jeffhuber.claudecowork-imessage.plist` points only
+  at the selected wrapper: the bridge-folder binary in standard mode or the
+  root-owned code-root binary in hardened mode. It must carry no other
+  arguments.
 
 ## Revoking
 
-To fully remove the plugin's access:
+To fully remove the helper's access:
 
-1. In Cowork, remove the plugin.
-2. `launchctl unload ~/Library/LaunchAgents/<plugin-plist>.plist`
-3. `rm ~/Library/LaunchAgents/<plugin-plist>.plist`
-4. `rm -rf ~/cowork-imessage` (bridge folder; includes helper and
-   any pending request/response files).
-5. System Settings → Privacy & Security → Full Disk Access → remove
+1. Run `./uninstall-hardened.sh` or `./uninstall.sh` in the bridge folder,
+   matching the installer you used.
+2. Delete the bridge folder: `rm -rf ~/imessage-bridge` (or wherever
+   you installed it).
+3. System Settings → Privacy & Security → Full Disk Access → remove
    `claude-cowork-imessage-helper`.
-6. System Settings → Privacy & Security → Automation →
+4. System Settings → Privacy & Security → Automation →
    claude-cowork-imessage-helper → turn Messages off (or remove the entry
    entirely).
 
 ## Reporting a vulnerability
 
 If you find a security issue, please do NOT open a public GitHub
-issue. Email <jhuber+coworkimessageplugin@gmail.com> with details and, if possible, a
+issue. Email <jhuber+claudecoworkimessage@gmail.com> with details and, if possible, a
 minimal reproduction. I will acknowledge within a few days and
 coordinate disclosure.

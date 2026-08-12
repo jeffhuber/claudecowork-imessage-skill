@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import plistlib
 import subprocess
 import sys
@@ -17,11 +18,16 @@ class PackagingTests(unittest.TestCase):
         source = (SKILL_ROOT / "bootstrap.sh").read_text()
         for required in (
             "install.sh",
+            "install-hardened.sh",
             "uninstall.sh",
+            "uninstall-hardened.sh",
             "com.jeffhuber.claudecowork-imessage.plist.template",
             "cowork_imessage_helper.c",
+            "confirm_imessage_send.m",
             "helper.py",
             "send_gate.py",
+            "doctor.py",
+            "configure_allowlist.py",
             "migrate_legacy_launchagent.py",
         ):
             self.assertIn(required, source)
@@ -30,8 +36,50 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('SEND_GATE_PY="$BIN_DIR/send_gate.py"', installer)
         self.assertIn('[[ ! -f "$SEND_GATE_PY" ]]', installer)
 
+    def test_bootstrap_produces_a_complete_installable_bridge(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="claude-imessage-bootstrap-") as td:
+            bridge = Path(td) / "bridge"
+            result = subprocess.run(
+                ["bash", str(SKILL_ROOT / "bootstrap.sh"), str(bridge)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            for relative in (
+                "install.sh",
+                "install-hardened.sh",
+                "uninstall.sh",
+                "uninstall-hardened.sh",
+                "com.jeffhuber.claudecowork-imessage.plist.template",
+                "bin/cowork_imessage_helper.c",
+                "bin/confirm_imessage_send.m",
+                "bin/helper.py",
+                "bin/send_gate.py",
+                "tools/doctor.py",
+                "tools/configure_allowlist.py",
+                "tools/migrate_legacy_launchagent.py",
+                "contacts/allowed_chats.txt.template",
+                "contacts/blocked_chats.txt.template",
+            ):
+                self.assertTrue((bridge / relative).is_file(), relative)
+
+            for relative in (
+                "install.sh",
+                "install-hardened.sh",
+                "uninstall.sh",
+                "uninstall-hardened.sh",
+            ):
+                self.assertTrue(os.access(bridge / relative, os.X_OK), relative)
+
     def test_claude_identity_does_not_claim_grok_resources(self) -> None:
-        for name in ("install.sh", "uninstall.sh"):
+        for name in (
+            "install.sh",
+            "install-hardened.sh",
+            "uninstall.sh",
+            "uninstall-hardened.sh",
+        ):
             source = (SKILL_ROOT / name).read_text()
             self.assertIn("com.jeffhuber.claudecowork-imessage", source)
             self.assertNotIn("com.jeffhuber.grokbot-imessage", source)
@@ -41,6 +89,44 @@ class PackagingTests(unittest.TestCase):
         ).read_text()
         self.assertIn("<string>com.jeffhuber.claudecowork-imessage</string>", template)
         self.assertIn("claude-cowork-imessage-helper", template)
+
+    def test_claude_and_grok_resource_contracts_are_disjoint(self) -> None:
+        claude = {
+            "com.jeffhuber.claudecowork-imessage",
+            "claude-cowork-imessage-helper",
+            "claude-cowork-imessage-confirm",
+            "/Library/Application Support/ClaudeCoworkIMessage",
+            "CLAUDE_COWORK_IMESSAGE_BRIDGE",
+        }
+        grok = {
+            "com.jeffhuber.grokbot-imessage",
+            "grokbot-imessage-helper",
+            "grokbot-imessage-confirm",
+            "/Library/Application Support/GrokBotIMessage",
+            "GROKBOT_IMESSAGE_BRIDGE",
+        }
+        self.assertTrue(claude.isdisjoint(grok))
+
+        shipped = "\n".join(
+            (SKILL_ROOT / name).read_text()
+            for name in (
+                "install.sh",
+                "install-hardened.sh",
+                "uninstall.sh",
+                "uninstall-hardened.sh",
+                "com.jeffhuber.claudecowork-imessage.plist.template",
+            )
+        )
+        for resource in claude:
+            self.assertIn(resource, shipped)
+        for resource in grok:
+            self.assertNotIn(resource, shipped)
+
+    def test_uninstallers_never_remove_the_legacy_shared_agent(self) -> None:
+        for name in ("uninstall.sh", "uninstall-hardened.sh"):
+            self.assertNotIn(
+                "com.user.cowork-imessage", (SKILL_ROOT / name).read_text()
+            )
 
 
 class LegacyMigrationTests(unittest.TestCase):
@@ -90,6 +176,14 @@ class LegacyMigrationTests(unittest.TestCase):
                 ),
                 1,
             )
+
+    def test_non_dictionary_legacy_plist_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="claude-imessage-legacy-") as td:
+            plist = Path(td) / "legacy.plist"
+            with plist.open("wb") as stream:
+                plistlib.dump(["not", "a", "launch-agent"], stream)
+
+            self.assertEqual(self._verify(plist, "/tmp/helper", "/tmp/requests"), 1)
 
 
 if __name__ == "__main__":

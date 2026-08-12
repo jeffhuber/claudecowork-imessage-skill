@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag and source versions
+        run: python3 tools/check_version.py "$GITHUB_REF_NAME"
+      - name: Run release checks
+        run: |
+          python3 -m py_compile skills/imessage-review/bin/helper.py skills/imessage-review/bin/send_gate.py skills/imessage-review/tools/doctor.py skills/imessage-review/tools/configure_allowlist.py skills/imessage-review/tools/migrate_legacy_launchagent.py tools/check_version.py
+          python3 -m unittest discover -s tests -v
+          bash -n skills/imessage-review/bootstrap.sh skills/imessage-review/install.sh skills/imessage-review/install-hardened.sh skills/imessage-review/uninstall.sh skills/imessage-review/uninstall-hardened.sh
+          shellcheck skills/imessage-review/bootstrap.sh skills/imessage-review/install.sh skills/imessage-review/install-hardened.sh skills/imessage-review/uninstall.sh skills/imessage-review/uninstall-hardened.sh
+          plutil -lint skills/imessage-review/com.jeffhuber.claudecowork-imessage.plist.template
+          clang -Wall -Wextra -Werror -O2 \
+            -DHELPER_SCRIPT='"/tmp/helper.py"' \
+            -DSEND_GATE_SCRIPT='"/tmp/send_gate.py"' \
+            -DCONFIRM_HELPER='"/tmp/claude-cowork-imessage-confirm"' \
+            -DBRIDGE_ROOT='"/tmp/claude-imessage-bridge"' \
+            -DPYTHON_INTERPRETER='"/usr/bin/python3"' \
+            -DHELPER_DISPLAY_NAME='"claude-cowork-imessage-helper"' \
+            -DHOST_DISPLAY_NAME='"Claude Cowork"' \
+            -fsyntax-only skills/imessage-review/bin/cowork_imessage_helper.c
+          clang -Wall -Wextra -Werror -fobjc-arc \
+            -framework AppKit -framework Foundation \
+            -o /tmp/claude-cowork-imessage-confirm \
+            skills/imessage-review/bin/confirm_imessage_send.m
+      - name: Build checksummed release artifacts
+        run: |
+          mkdir -p dist
+          PREFIX="claudecowork-imessage-skill-${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz --prefix="$PREFIX/" -o "dist/$PREFIX.tar.gz" "$GITHUB_SHA"
+          git archive --format=zip --prefix="$PREFIX/" -o "dist/$PREFIX.zip" "$GITHUB_SHA"
+          git archive --format=zip -o dist/imessage-review.plugin "$GITHUB_SHA"
+          (cd dist && shasum -a 256 "$PREFIX.tar.gz" "$PREFIX.zip" imessage-review.plugin > SHA256SUMS)
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag

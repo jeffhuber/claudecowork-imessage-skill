@@ -14,7 +14,9 @@ fi
 mkdir -p "$DESTINATION/bin" "$DESTINATION/tools" "$DESTINATION/contacts"
 for file in \
     install.sh \
+    install-hardened.sh \
     uninstall.sh \
+    uninstall-hardened.sh \
     com.jeffhuber.claudecowork-imessage.plist.template; do
     cp "$SOURCE_ROOT/$file" "$DESTINATION/$file"
 done
@@ -30,7 +32,8 @@ cp "$SOURCE_ROOT/tools/doctor.py" "$DESTINATION/tools/"
 cp "$SOURCE_ROOT/tools/configure_allowlist.py" "$DESTINATION/tools/"
 cp "$SOURCE_ROOT/contacts/allowed_chats.txt.template" "$DESTINATION/contacts/"
 cp "$SOURCE_ROOT/contacts/blocked_chats.txt.template" "$DESTINATION/contacts/"
-chmod 700 "$DESTINATION/install.sh" "$DESTINATION/uninstall.sh"
+chmod 700 "$DESTINATION/install.sh" "$DESTINATION/install-hardened.sh" \
+    "$DESTINATION/uninstall.sh" "$DESTINATION/uninstall-hardened.sh"
 chmod 700 "$DESTINATION/tools/"*.py
 
 echo "Copied the complete Claude Cowork iMessage helper to $DESTINATION"

@@ -8,7 +8,10 @@ __pycache__/
 
 # Build artifacts (per-machine — users build locally via install.sh)
 bin/cowork-imessage-helper
+skills/imessage-review/bin/claude-cowork-imessage-helper
+skills/imessage-review/bin/claude-cowork-imessage-confirm
 *.plugin
+dist/
 
 # Per-install private runtime state
 skills/imessage-review/contacts/blocked_chats.txt
