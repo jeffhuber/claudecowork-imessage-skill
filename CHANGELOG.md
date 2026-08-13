@@ -14,6 +14,8 @@ reported by the `status` action.
 - Add private atomic request, response, log, and nonce handling with bounded
   retention and no-follow runtime path validation.
 - Use SQLite's online backup API for consistent snapshots of Messages data.
+- Open completed Messages snapshots as immutable, read-only databases so
+  WAL-marked snapshots do not require writable `-wal` or `-shm` sidecars.
 - Add `status`, a non-destructive doctor, protocol compatibility reporting,
   tests, CI, and checksummed source/plugin release artifacts.
 - Add an optional hardened install with root-owned executable code, wrapper
