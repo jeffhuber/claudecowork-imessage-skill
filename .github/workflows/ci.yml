@@ -33,7 +33,7 @@ jobs:
           tools/check_version.py
       - run: python -m unittest discover -s tests -v
       - run: python -m json.tool .claude-plugin/plugin.json >/dev/null
-      - run: python tools/check_version.py v1.1.0
+      - run: python tools/check_version.py v1.1.1
       - run: bash -n skills/imessage-review/bootstrap.sh skills/imessage-review/install.sh skills/imessage-review/install-hardened.sh skills/imessage-review/uninstall.sh skills/imessage-review/uninstall-hardened.sh
       - run: shellcheck skills/imessage-review/bootstrap.sh skills/imessage-review/install.sh skills/imessage-review/install-hardened.sh skills/imessage-review/uninstall.sh skills/imessage-review/uninstall-hardened.sh
 
