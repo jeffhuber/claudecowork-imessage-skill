@@ -33,10 +33,20 @@ class TestSendGate(unittest.TestCase):
         self._tmp = str(pathlib.Path(
             tempfile.mkdtemp(prefix="cowork-imessage-test-")
         ).resolve())
+        self._old_imessage_bridge = os.environ.get("IMESSAGE_BRIDGE_DIR")
+        self._old_cowork_bridge = os.environ.get("COWORK_IMESSAGE_BRIDGE_DIR")
+        os.environ["IMESSAGE_BRIDGE_DIR"] = self._tmp
         os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = self._tmp
 
     def tearDown(self):
-        os.environ.pop("COWORK_IMESSAGE_BRIDGE_DIR", None)
+        if self._old_imessage_bridge is None:
+            os.environ.pop("IMESSAGE_BRIDGE_DIR", None)
+        else:
+            os.environ["IMESSAGE_BRIDGE_DIR"] = self._old_imessage_bridge
+        if self._old_cowork_bridge is None:
+            os.environ.pop("COWORK_IMESSAGE_BRIDGE_DIR", None)
+        else:
+            os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = self._old_cowork_bridge
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     # --- happy path ----------------------------------------------------
