@@ -83,7 +83,11 @@ responses, policies, logs, and nonces.
 
 ## Coexistence
 
-These are independent helpers by design. Each uses distinct LaunchAgents, wrappers, bridges, FDA grants, and runtime state. Do not share a bridge folder, request queue, or Full Disk Access grant between hosts. Three independent copies is the architecture — not a temporary state before unification.
+Runtime isolation and source parity are separate requirements. Each host uses a
+distinct LaunchAgent, wrapper, bridge, FDA grant, policy, and nonce store; never
+share those runtime boundaries. The security-critical implementation is kept in
+parity across the three repositories through `shared-core.json` and CI. See
+[Shared Core Maintenance](docs/SHARED_CORE.md).
 
 - **Grok Bot** — LaunchAgent `com.jeffhuber.grokbot-imessage`, wrapper `grokbot-imessage-helper` — https://github.com/jeffhuber/grokbot-imessage-skill
 - **Claude Cowork** — LaunchAgent `com.jeffhuber.claudecowork-imessage`, wrapper `claude-cowork-imessage-helper` — https://github.com/jeffhuber/claudecowork-imessage-skill
@@ -119,11 +123,18 @@ helper assets into that folder, or run the bundled script directly:
 cd "$HOME/Documents/claude-imessage-bridge"
 ```
 
-Never point Claude and Grok at the same bridge. Their LaunchAgents and binaries
-are host-specific, and their requests, responses, policies, logs, and nonces
-must remain independent.
+Never point Claude and another host at the same bridge. Their LaunchAgents and
+binaries are host-specific, and their requests, responses, policies, logs, and
+nonces must remain independent.
 
 ### 3. Choose an installation mode
+
+Choose deliberately based on the local threat model:
+
+| Mode | Best fit | Security and operational tradeoff |
+|---|---|---|
+| **Standard** | **Default.** Personal Mac, getting started, and everyday use. | No `sudo`; user-writable code does not resist a compromised same-user process. |
+| **Hardened** | You run other unsandboxed automation as your user, or want a root-owned default-deny allowlist. | Root-owned validated code; requires `sudo` and explicit allowlist maintenance. |
 
 **Standard per-user install:**
 
@@ -135,7 +146,7 @@ This requires no administrator access and defaults to a user-editable
 blocklist. Code in the bridge is writable by processes running as your user,
 so this mode does not resist a compromised same-user process.
 
-**Hardened install (optional):**
+**Hardened install:**
 
 ```bash
 ./install-hardened.sh

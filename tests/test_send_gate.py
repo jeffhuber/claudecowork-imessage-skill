@@ -176,6 +176,14 @@ class TestSendGate(unittest.TestCase):
                 except Exception:
                     pass
 
+    def test_empty_new_bridge_dir_does_not_fall_back_to_old_name(self):
+        os.environ["IMESSAGE_BRIDGE_DIR"] = ""
+        os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = self._tmp
+        with self.assertRaisesRegex(RuntimeError, "IMESSAGE_BRIDGE_DIR is required"):
+            send_gate._bridge_dir()
+        with self.assertRaisesRegex(RuntimeError, "IMESSAGE_BRIDGE_DIR is required"):
+            mint_send_nonce("+15551234", "hi", "iMessage")
+
     def test_bridge_dir_accepts_old_env_var_name(self):
         """Old name COWORK_IMESSAGE_BRIDGE_DIR still works as fallback."""
         old_path = tempfile.mkdtemp(prefix="old-bridge-fallback-")

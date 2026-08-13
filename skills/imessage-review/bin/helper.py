@@ -45,14 +45,20 @@ from typing import Any, Iterable
 # Paths
 # ---------------------------------------------------------------------------
 CODE_ROOT = Path(__file__).resolve().parent.parent
-# Compute bridge root from either env var, falling back to CODE_ROOT.
-# Do NOT setdefault yet — tests may set COWORK_IMESSAGE_BRIDGE_DIR after import.
-_bridge_from_env = (
-    os.environ.get("IMESSAGE_BRIDGE_DIR")
-    or os.environ.get("COWORK_IMESSAGE_BRIDGE_DIR")
-    or str(CODE_ROOT)
+if "IMESSAGE_BRIDGE_DIR" in os.environ:
+    _bridge_root_value = os.environ["IMESSAGE_BRIDGE_DIR"]
+elif "COWORK_IMESSAGE_BRIDGE_DIR" in os.environ:
+    _bridge_root_value = os.environ["COWORK_IMESSAGE_BRIDGE_DIR"]
+else:
+    _bridge_root_value = str(CODE_ROOT)
+if not _bridge_root_value:
+    raise RuntimeError(
+        "IMESSAGE_BRIDGE_DIR is required "
+        "(COWORK_IMESSAGE_BRIDGE_DIR remains a one-release compatibility alias)"
+    )
+BRIDGE_ROOT = Path(
+    os.path.abspath(os.path.expanduser(_bridge_root_value))
 )
-BRIDGE_ROOT = Path(os.path.abspath(os.path.expanduser(_bridge_from_env)))
 REQUESTS_DIR = BRIDGE_ROOT / "control" / "requests"
 RESPONSES_DIR = BRIDGE_ROOT / "control" / "responses"
 LOG_PATH = BRIDGE_ROOT / "control" / "log.txt"
@@ -94,12 +100,11 @@ def _load_sibling(name: str):
     return mod
 
 
-# Route send_gate's state to our install tree so it uses the same bridge
-# directory as the helper. Only setdefault if neither is already set;
-# otherwise respect test overrides.
+# Route send_gate's state to the bridge so the send gate knows where to write
+# nonces. Preserve explicit values and retain the legacy name as a
+# compatibility input. Empty explicit values have already failed closed above.
 if "IMESSAGE_BRIDGE_DIR" not in os.environ and "COWORK_IMESSAGE_BRIDGE_DIR" not in os.environ:
     os.environ["IMESSAGE_BRIDGE_DIR"] = str(BRIDGE_ROOT)
-    os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = str(BRIDGE_ROOT)
 _send_gate = _load_sibling("send_gate")
 SEND_NONCE_TTL = _send_gate.SEND_NONCE_TTL
 SendGateError = _send_gate.SendGateError
