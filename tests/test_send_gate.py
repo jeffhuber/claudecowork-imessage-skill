@@ -141,6 +141,13 @@ class TestSendGate(unittest.TestCase):
         # Still usable.
         consume_send_nonce(n, "+15551234", "hi", "iMessage")
 
+    # --- environment requirement ---------------------------------------
+
+    def test_bridge_dir_requires_env_var(self):
+        os.environ.pop("COWORK_IMESSAGE_BRIDGE_DIR", None)
+        with self.assertRaisesRegex(RuntimeError, "COWORK_IMESSAGE_BRIDGE_DIR is required"):
+            send_gate._bridge_dir()
+
 
 if __name__ == "__main__":
     unittest.main()

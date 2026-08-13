@@ -79,6 +79,14 @@ The helper uses the host-specific LaunchAgent
 Grok Bot helper. Each host must use its own bridge folder, request queue,
 responses, policies, logs, and nonces.
 
+## Coexistence
+
+These are independent helpers. Do not share a bridge folder, request queue, or Full Disk Access grant.
+
+- **Grok Bot** — LaunchAgent `com.jeffhuber.grokbot-imessage`, wrapper `grokbot-imessage-helper` — https://github.com/jeffhuber/grokbot-imessage-skill
+- **Claude Cowork** — LaunchAgent `com.jeffhuber.claudecowork-imessage`, wrapper `claude-cowork-imessage-helper` — https://github.com/jeffhuber/claudecowork-imessage-skill
+- **ChatGPT/Codex** — LaunchAgent `com.jeffhuber.chatgpt-codex-imessage`, wrapper `chatgpt-codex-imessage-helper` — https://github.com/jeffhuber/chatgpt-codex-imessage-plugin
+
 ## Install
 
 ### 1. Install the plugin
