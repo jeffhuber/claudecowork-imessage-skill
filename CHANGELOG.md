@@ -6,10 +6,14 @@ reported by the `status` action.
 
 ## Unreleased
 
+## 1.1.1 - 2026-08-12
+
 - Rename wrapper source from `cowork_imessage_helper.c` to `imessage_helper.c`.
 - Export `IMESSAGE_BRIDGE_DIR`; keep `COWORK_IMESSAGE_BRIDGE_DIR` as a one-release alias.
 - Refuse the retired `~/cowork-imessage` send-gate default; `COWORK_IMESSAGE_BRIDGE_DIR` is now required.
 - Document three-host coexistence (Grok Bot, Claude Cowork, ChatGPT/Codex).
+- Lead with standard install in README (hardened is optional, not default-recommended).
+- Add native send-confirmation dialog screenshot to documentation.
 
 ## 1.1.0 - 2026-08-12
 

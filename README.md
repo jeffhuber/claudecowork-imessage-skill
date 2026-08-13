@@ -1,6 +1,8 @@
-# imessage-review
+# Claude Cowork iMessage skill
 
 Read, search, and analyze your iMessages on macOS from inside Claude Cowork.
+
+**Security**: See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## What's in the box
 
@@ -81,7 +83,7 @@ responses, policies, logs, and nonces.
 
 ## Coexistence
 
-These are independent helpers. Do not share a bridge folder, request queue, or Full Disk Access grant.
+These are independent helpers by design. Each uses distinct LaunchAgents, wrappers, bridges, FDA grants, and runtime state. Do not share a bridge folder, request queue, or Full Disk Access grant between hosts. Three independent copies is the architecture — not a temporary state before unification.
 
 - **Grok Bot** — LaunchAgent `com.jeffhuber.grokbot-imessage`, wrapper `grokbot-imessage-helper` — https://github.com/jeffhuber/grokbot-imessage-skill
 - **Claude Cowork** — LaunchAgent `com.jeffhuber.claudecowork-imessage`, wrapper `claude-cowork-imessage-helper` — https://github.com/jeffhuber/claudecowork-imessage-skill
@@ -123,7 +125,17 @@ must remain independent.
 
 ### 3. Choose an installation mode
 
-**Hardened install (recommended):**
+**Standard per-user install:**
+
+```bash
+./install.sh
+```
+
+This requires no administrator access and defaults to a user-editable
+blocklist. Code in the bridge is writable by processes running as your user,
+so this mode does not resist a compromised same-user process.
+
+**Hardened install (optional):**
 
 ```bash
 ./install-hardened.sh
@@ -138,16 +150,6 @@ default-deny through a root-owned allowlist:
 CODE_ROOT="/Library/Application Support/ClaudeCoworkIMessage/users/$UID/libexec"
 python3 "$CODE_ROOT/tools/configure_allowlist.py" add +15551234567
 ```
-
-**Standard per-user install:**
-
-```bash
-./install.sh
-```
-
-This requires no administrator access and defaults to a user-editable
-blocklist. Code in the bridge is writable by processes running as your user,
-so this mode does not resist a compromised same-user process.
 
 Both modes compile the wrapper and native confirmation helper locally, create
 private runtime directories, install
@@ -179,6 +181,11 @@ Claude will:
 2. **Wait for your explicit OK.** Nothing sends until you confirm.
 3. Run `send`. A native macOS window shows the exact phone/email, service, and
    full body. Cancel is the Return-key default and a timeout cancels the send.
+
+![Native send confirmation dialog. Cancel is the default action.](docs/images/send-confirm-dialog.png)
+
+*The native confirmation dialog (shown here with example payload from Grok Bot). Cancel is the Return-key default. The same NSAlert is used by all three iMessage helpers (Grok Bot, Claude Cowork, ChatGPT/Codex).*
+
 4. Deliberately click **Send**. The helper invokes `osascript` and removes its
    UTF-8 body tempfile whether delivery succeeds or fails.
 

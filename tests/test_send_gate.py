@@ -31,7 +31,7 @@ class TestSendGate(unittest.TestCase):
     def setUp(self):
         # Fresh bridge dir per test; env override routes all paths there.
         self._tmp = str(pathlib.Path(
-            tempfile.mkdtemp(prefix="cowork-imessage-test-")
+            tempfile.mkdtemp(prefix="claudecowork-imessage-test-")
         ).resolve())
         self._old_imessage_bridge = os.environ.get("IMESSAGE_BRIDGE_DIR")
         self._old_cowork_bridge = os.environ.get("COWORK_IMESSAGE_BRIDGE_DIR")

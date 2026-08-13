@@ -1,5 +1,5 @@
 #!/bin/bash
-# uninstall.sh — remove the cowork-imessage launchd agent.
+# uninstall.sh — remove the Claude Cowork iMessage LaunchAgent.
 #
 # Leaves files under bin/, control/, and contacts/ in place so any captured
 # data is preserved. Also leaves the FDA grant — you must remove that

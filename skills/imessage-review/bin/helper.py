@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cowork-imessage helper
+"""Claude Cowork iMessage helper
 
 Runs on macOS, triggered by launchd when a new file lands in control/requests/.
 Scans the request queue, dispatches each whitelisted action against a snapshot
@@ -72,7 +72,7 @@ CONFIRM_HELPER_PATH = CODE_ROOT / "bin" / "claude-cowork-imessage-confirm"
 CHAT_DB_PATH = Path.home() / "Library" / "Messages" / "chat.db"
 HOST_DISPLAY_NAME = os.environ.get("IMESSAGE_HOST_DISPLAY_NAME", "Claude Cowork")
 
-HELPER_VERSION = "1.1.0"
+HELPER_VERSION = "1.1.1"
 PROTOCOL_VERSION = "1.1"
 
 # ---------------------------------------------------------------------------
@@ -94,9 +94,9 @@ def _load_sibling(name: str):
     return mod
 
 
-# Route send_gate's state to our install tree so a non-default install
-# (helper lives somewhere other than ~/cowork-imessage/) still works.
-# Only setdefault if neither is already set; otherwise respect test overrides.
+# Route send_gate's state to our install tree so it uses the same bridge
+# directory as the helper. Only setdefault if neither is already set;
+# otherwise respect test overrides.
 if "IMESSAGE_BRIDGE_DIR" not in os.environ and "COWORK_IMESSAGE_BRIDGE_DIR" not in os.environ:
     os.environ["IMESSAGE_BRIDGE_DIR"] = str(BRIDGE_ROOT)
     os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = str(BRIDGE_ROOT)

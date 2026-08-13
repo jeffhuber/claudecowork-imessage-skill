@@ -8,7 +8,7 @@ description: >
   iMessage. macOS only — uses an on-device launchd helper to query the
   Messages SQLite database, and AppleScript (osascript) via the same helper
   to send outbound messages.
-version: 1.1.0
+version: 1.1.1
 ---
 
 # iMessage on macOS — Cowork-native
