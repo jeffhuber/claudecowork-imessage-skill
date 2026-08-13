@@ -1,6 +1,8 @@
-# imessage-review
+# Claude Cowork iMessage skill
 
 Read, search, and analyze your iMessages on macOS from inside Claude Cowork.
+
+**Security**: See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## What's in the box
 

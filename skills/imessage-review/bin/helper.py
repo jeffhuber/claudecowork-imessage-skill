@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cowork-imessage helper
+"""Claude Cowork iMessage helper
 
 Runs on macOS, triggered by launchd when a new file lands in control/requests/.
 Scans the request queue, dispatches each whitelisted action against a snapshot
@@ -94,9 +94,9 @@ def _load_sibling(name: str):
     return mod
 
 
-# Route send_gate's state to our install tree so a non-default install
-# (helper lives somewhere other than ~/cowork-imessage/) still works.
-# Only setdefault if neither is already set; otherwise respect test overrides.
+# Route send_gate's state to our install tree so it uses the same bridge
+# directory as the helper. Only setdefault if neither is already set;
+# otherwise respect test overrides.
 if "IMESSAGE_BRIDGE_DIR" not in os.environ and "COWORK_IMESSAGE_BRIDGE_DIR" not in os.environ:
     os.environ["IMESSAGE_BRIDGE_DIR"] = str(BRIDGE_ROOT)
     os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = str(BRIDGE_ROOT)

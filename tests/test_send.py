@@ -44,11 +44,11 @@ def _mint(to, text, service="iMessage"):
 
 class _BridgeDirMixin:
     """Route send_gate state (mint_send_nonce, consume_send_nonce, reap)
-    at a per-test tempdir so tests don't touch ~/cowork-imessage/nonces."""
+    at a per-test tempdir so tests don't touch the real bridge nonces directory."""
 
     def setUp(self):
         self._bridge_tmp = str(pathlib.Path(
-            tempfile.mkdtemp(prefix="cowork-imessage-test-")
+            tempfile.mkdtemp(prefix="claudecowork-imessage-test-")
         ).resolve())
         self._old_imessage_bridge = os.environ.get("IMESSAGE_BRIDGE_DIR")
         self._old_cowork_bridge = os.environ.get("COWORK_IMESSAGE_BRIDGE_DIR")
