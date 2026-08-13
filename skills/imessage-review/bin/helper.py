@@ -45,11 +45,14 @@ from typing import Any, Iterable
 # Paths
 # ---------------------------------------------------------------------------
 CODE_ROOT = Path(__file__).resolve().parent.parent
-BRIDGE_ROOT = Path(
-    os.path.abspath(
-        os.path.expanduser(os.environ.get("COWORK_IMESSAGE_BRIDGE_DIR", str(CODE_ROOT)))
-    )
+# Compute bridge root from either env var, falling back to CODE_ROOT.
+# Do NOT setdefault yet — tests may set COWORK_IMESSAGE_BRIDGE_DIR after import.
+_bridge_from_env = (
+    os.environ.get("IMESSAGE_BRIDGE_DIR")
+    or os.environ.get("COWORK_IMESSAGE_BRIDGE_DIR")
+    or str(CODE_ROOT)
 )
+BRIDGE_ROOT = Path(os.path.abspath(os.path.expanduser(_bridge_from_env)))
 REQUESTS_DIR = BRIDGE_ROOT / "control" / "requests"
 RESPONSES_DIR = BRIDGE_ROOT / "control" / "responses"
 LOG_PATH = BRIDGE_ROOT / "control" / "log.txt"
@@ -93,7 +96,10 @@ def _load_sibling(name: str):
 
 # Route send_gate's state to our install tree so a non-default install
 # (helper lives somewhere other than ~/cowork-imessage/) still works.
-os.environ.setdefault("COWORK_IMESSAGE_BRIDGE_DIR", str(BRIDGE_ROOT))
+# Only setdefault if neither is already set; otherwise respect test overrides.
+if "IMESSAGE_BRIDGE_DIR" not in os.environ and "COWORK_IMESSAGE_BRIDGE_DIR" not in os.environ:
+    os.environ["IMESSAGE_BRIDGE_DIR"] = str(BRIDGE_ROOT)
+    os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = str(BRIDGE_ROOT)
 _send_gate = _load_sibling("send_gate")
 SEND_NONCE_TTL = _send_gate.SEND_NONCE_TTL
 SendGateError = _send_gate.SendGateError

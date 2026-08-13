@@ -21,7 +21,7 @@ for file in \
     cp "$SOURCE_ROOT/$file" "$DESTINATION/$file"
 done
 for file in \
-    cowork_imessage_helper.c \
+    imessage_helper.c \
     confirm_imessage_send.m \
     helper.py \
     send_gate.py; do

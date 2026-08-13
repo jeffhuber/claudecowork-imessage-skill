@@ -16,15 +16,22 @@ class BridgeDirMixin:
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="claude-imessage-test-")
         self.addCleanup(self._tmp.cleanup)
-        self._old_bridge = os.environ.get("COWORK_IMESSAGE_BRIDGE_DIR")
-        os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = os.path.realpath(self._tmp.name)
+        self._old_imessage_bridge = os.environ.get("IMESSAGE_BRIDGE_DIR")
+        self._old_cowork_bridge = os.environ.get("COWORK_IMESSAGE_BRIDGE_DIR")
+        tmp_path = os.path.realpath(self._tmp.name)
+        os.environ["IMESSAGE_BRIDGE_DIR"] = tmp_path
+        os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = tmp_path
         self.addCleanup(self._restore_bridge)
 
     def _restore_bridge(self) -> None:
-        if self._old_bridge is None:
+        if self._old_imessage_bridge is None:
+            os.environ.pop("IMESSAGE_BRIDGE_DIR", None)
+        else:
+            os.environ["IMESSAGE_BRIDGE_DIR"] = self._old_imessage_bridge
+        if self._old_cowork_bridge is None:
             os.environ.pop("COWORK_IMESSAGE_BRIDGE_DIR", None)
         else:
-            os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = self._old_bridge
+            os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = self._old_cowork_bridge
 
 
 class SendConfirmationTests(BridgeDirMixin, unittest.TestCase):
