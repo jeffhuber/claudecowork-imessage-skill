@@ -40,6 +40,7 @@ spec.loader.exec_module(module)
 print(module.ALLOWLIST_PATH)
 """
             env = os.environ.copy()
+            env.pop("IMESSAGE_BRIDGE_DIR", None)
             env["COWORK_IMESSAGE_BRIDGE_DIR"] = str(bridge)
             env["COWORK_IMESSAGE_READ_ALLOWLIST"] = ""
             result = subprocess.run(
@@ -166,7 +167,7 @@ class WrapperValidationTests(unittest.TestCase):
                     f'-DPYTHON_INTERPRETER="{sys.executable}"',
                     "-o",
                     str(wrapper),
-                    str(SKILL_ROOT / "bin" / "cowork_imessage_helper.c"),
+                    str(SKILL_ROOT / "bin" / "imessage_helper.c"),
                 ],
                 capture_output=True,
                 text=True,

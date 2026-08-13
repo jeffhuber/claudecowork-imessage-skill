@@ -276,7 +276,7 @@ You can verify what's actually on your disk:
 - All source is in this repository under `skills/imessage-review/`. Read
   `bin/helper.py` and `bin/send_gate.py`; they run inside the FDA-granted Python
   process. The native confirmation source is `bin/confirm_imessage_send.m`.
-- The C wrapper source is `bin/cowork_imessage_helper.c`. It stabilizes the
+- The C wrapper source is `bin/imessage_helper.c`. It stabilizes the
   CDHash, validates every executable component and policy path, sets a minimal
   environment, and then executes Python.
 - Verify the repository contents match a tagged GitHub release. Release source

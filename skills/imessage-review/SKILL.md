@@ -57,7 +57,7 @@ skill directory (alongside this `SKILL.md`):
 - `install-hardened.sh` / `uninstall-hardened.sh` (recommended mode)
 - `bootstrap.sh`
 - `com.jeffhuber.claudecowork-imessage.plist.template`
-- `bin/cowork_imessage_helper.c` (wrapper source)
+- `bin/imessage_helper.c` (wrapper source)
 - `bin/helper.py` (Python worker)
 - `bin/send_gate.py` (send gate)
 - `bin/confirm_imessage_send.m` (native confirmation source)
@@ -353,7 +353,7 @@ threads here.
 | `uninstall.sh` | Removes the launchd agent. Leaves files + FDA grant. |
 | `uninstall-hardened.sh` | Removes only Claude's root-owned helper and LaunchAgent. |
 | `com.jeffhuber.claudecowork-imessage.plist.template` | launchd agent template. Filled in by `install.sh` and copied to `~/Library/LaunchAgents/`. |
-| `bin/cowork_imessage_helper.c` | Tiny hardened wrapper. FDA is granted to this. Ignores argv, sanitizes environment, execs helper.py. |
+| `bin/imessage_helper.c` | Tiny hardened wrapper. FDA is granted to this. Ignores argv, sanitizes environment, execs helper.py. |
 | `bin/helper.py` | Python helper. Scans `control/requests/`, dispatches actions, writes `control/responses/response-*.json`. |
 | `bin/send_gate.py` | Helper-side preview/confirm gate. Mints single-use nonces on `send_preview`, consumes them on `send`. Persists under `<bridge>/nonces/`. (v0.4.0+) |
 | `bin/confirm_imessage_send.m` | Native, fail-closed send confirmation UI. |

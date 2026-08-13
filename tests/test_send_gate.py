@@ -145,8 +145,40 @@ class TestSendGate(unittest.TestCase):
 
     def test_bridge_dir_requires_env_var(self):
         os.environ.pop("COWORK_IMESSAGE_BRIDGE_DIR", None)
-        with self.assertRaisesRegex(RuntimeError, "COWORK_IMESSAGE_BRIDGE_DIR is required"):
+        os.environ.pop("IMESSAGE_BRIDGE_DIR", None)
+        with self.assertRaisesRegex(RuntimeError, "IMESSAGE_BRIDGE_DIR is required"):
             send_gate._bridge_dir()
+
+    def test_bridge_dir_prefers_new_env_var_name(self):
+        """New name IMESSAGE_BRIDGE_DIR takes precedence."""
+        new_path = tempfile.mkdtemp(prefix="new-bridge-")
+        old_path = tempfile.mkdtemp(prefix="old-bridge-")
+        try:
+            os.environ["IMESSAGE_BRIDGE_DIR"] = new_path
+            os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = old_path
+            self.assertEqual(str(send_gate._bridge_dir()), os.path.abspath(new_path))
+        finally:
+            os.environ.pop("IMESSAGE_BRIDGE_DIR", None)
+            os.environ.pop("COWORK_IMESSAGE_BRIDGE_DIR", None)
+            for p in (new_path, old_path):
+                try:
+                    os.rmdir(p)
+                except Exception:
+                    pass
+
+    def test_bridge_dir_accepts_old_env_var_name(self):
+        """Old name COWORK_IMESSAGE_BRIDGE_DIR still works as fallback."""
+        old_path = tempfile.mkdtemp(prefix="old-bridge-fallback-")
+        try:
+            os.environ.pop("IMESSAGE_BRIDGE_DIR", None)
+            os.environ["COWORK_IMESSAGE_BRIDGE_DIR"] = old_path
+            self.assertEqual(str(send_gate._bridge_dir()), os.path.abspath(old_path))
+        finally:
+            os.environ.pop("COWORK_IMESSAGE_BRIDGE_DIR", None)
+            try:
+                os.rmdir(old_path)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
