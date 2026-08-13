@@ -4,7 +4,7 @@ Notable changes are documented here. Releases use semantic versioning for the
 plugin, skill, and helper. The bridge protocol has its own compatibility version
 reported by the `status` action.
 
-## 1.1.0 - Unreleased
+## 1.1.0 - 2026-08-12
 
 - Give Claude Cowork an independent LaunchAgent, plist, wrapper, confirmation
   helper, and hardened product root so it can run beside Grok Bot.
