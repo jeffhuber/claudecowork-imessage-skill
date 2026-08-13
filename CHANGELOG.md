@@ -6,9 +6,16 @@ reported by the `status` action.
 
 ## Unreleased
 
+## 1.2.0 - 2026-08-13
+
 - Clarify standard and hardened installation as an explicit threat-model choice.
 - Add a deterministic shared-core manifest and CI check for security parity
   with the Grok Bot and ChatGPT/Codex sibling repositories.
+- Fail closed when `IMESSAGE_BRIDGE_DIR` is empty (the retired `~/cowork-imessage`
+  default no longer falls through silently).
+- Document standard installation as the default-recommended posture in README;
+  hardened remains available for organizations requiring defense-in-depth.
+- Bridge protocol remains at 1.1 (no changes).
 
 ## 1.1.1 - 2026-08-12
 
