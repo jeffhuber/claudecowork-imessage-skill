@@ -4,6 +4,11 @@ Notable changes are documented here. Releases use semantic versioning for the
 plugin, skill, and helper. The bridge protocol has its own compatibility version
 reported by the `status` action.
 
+## Unreleased
+
+- Refuse the retired `~/cowork-imessage` send-gate default; `COWORK_IMESSAGE_BRIDGE_DIR` is now required.
+- Document three-host coexistence (Grok Bot, Claude Cowork, ChatGPT/Codex).
+
 ## 1.1.0 - 2026-08-12
 
 - Give Claude Cowork an independent LaunchAgent, plist, wrapper, confirmation
