@@ -6,6 +6,10 @@ reported by the `status` action.
 
 ## Unreleased
 
+- Clarify standard and hardened installation as an explicit threat-model choice.
+- Add a deterministic shared-core manifest and CI check for security parity
+  with the Grok Bot and ChatGPT/Codex sibling repositories.
+
 ## 1.1.1 - 2026-08-12
 
 - Rename wrapper source from `cowork_imessage_helper.c` to `imessage_helper.c`.
