@@ -63,6 +63,16 @@ def plugin_version() -> str:
     return version
 
 
+def shared_core_version() -> str:
+    payload = json.loads(
+        (REPO_ROOT / "shared-core.json").read_text(encoding="utf-8")
+    )
+    version = payload.get("identity", {}).get("helper_version")
+    if not isinstance(version, str):
+        raise RuntimeError("identity.helper_version not found in shared-core.json")
+    return version
+
+
 def check_changelog(expected_version: str) -> tuple[bool, str]:
     content = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     pattern = (
@@ -96,6 +106,7 @@ def main() -> int:
         "helper": helper_version(),
         "skill": skill_version(),
         "plugin": plugin_version(),
+        "shared-core": shared_core_version(),
     }
     mismatches = {name: version for name, version in versions.items() if version != expected}
     if mismatches:
