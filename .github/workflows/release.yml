@@ -21,8 +21,8 @@ jobs:
           python3 -m py_compile skills/imessage-review/bin/helper.py skills/imessage-review/bin/send_gate.py skills/imessage-review/tools/doctor.py skills/imessage-review/tools/configure_allowlist.py skills/imessage-review/tools/migrate_legacy_launchagent.py tools/check_shared_core.py tools/check_version.py
           python3 -m unittest discover -s tests -v
           python3 tools/check_shared_core.py
-          bash -n skills/imessage-review/bootstrap.sh skills/imessage-review/install.sh skills/imessage-review/install-hardened.sh skills/imessage-review/uninstall.sh skills/imessage-review/uninstall-hardened.sh
-          shellcheck skills/imessage-review/bootstrap.sh skills/imessage-review/install.sh skills/imessage-review/install-hardened.sh skills/imessage-review/uninstall.sh skills/imessage-review/uninstall-hardened.sh
+          bash -n skills/imessage-review/bootstrap.sh skills/imessage-review/install.sh skills/imessage-review/install-hardened.sh skills/imessage-review/uninstall.sh skills/imessage-review/uninstall-hardened.sh skills/imessage-review/tools/select_python.sh
+          shellcheck skills/imessage-review/bootstrap.sh skills/imessage-review/install.sh skills/imessage-review/install-hardened.sh skills/imessage-review/uninstall.sh skills/imessage-review/uninstall-hardened.sh skills/imessage-review/tools/select_python.sh
           plutil -lint skills/imessage-review/com.jeffhuber.claudecowork-imessage.plist.template
           clang -Wall -Wextra -Werror -O2 \
             -DHELPER_SCRIPT='"/tmp/helper.py"' \
