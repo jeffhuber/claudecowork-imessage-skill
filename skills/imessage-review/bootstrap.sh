@@ -30,11 +30,13 @@ done
 cp "$SOURCE_ROOT/tools/migrate_legacy_launchagent.py" "$DESTINATION/tools/"
 cp "$SOURCE_ROOT/tools/doctor.py" "$DESTINATION/tools/"
 cp "$SOURCE_ROOT/tools/configure_allowlist.py" "$DESTINATION/tools/"
+cp "$SOURCE_ROOT/tools/select_python.sh" "$DESTINATION/tools/"
 cp "$SOURCE_ROOT/contacts/allowed_chats.txt.template" "$DESTINATION/contacts/"
 cp "$SOURCE_ROOT/contacts/blocked_chats.txt.template" "$DESTINATION/contacts/"
 chmod 700 "$DESTINATION/install.sh" "$DESTINATION/install-hardened.sh" \
     "$DESTINATION/uninstall.sh" "$DESTINATION/uninstall-hardened.sh"
 chmod 700 "$DESTINATION/tools/"*.py
+chmod 700 "$DESTINATION/tools/select_python.sh"
 
 echo "Copied the complete Claude Cowork iMessage helper to $DESTINATION"
 echo "Next: cd \"$DESTINATION\" && ./install.sh"

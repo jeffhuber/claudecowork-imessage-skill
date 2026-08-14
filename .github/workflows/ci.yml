@@ -36,8 +36,8 @@ jobs:
       - run: python tools/check_shared_core.py
       - run: python -m json.tool .claude-plugin/plugin.json >/dev/null
       - run: python tools/check_version.py v1.2.0
-      - run: bash -n skills/imessage-review/bootstrap.sh skills/imessage-review/install.sh skills/imessage-review/install-hardened.sh skills/imessage-review/uninstall.sh skills/imessage-review/uninstall-hardened.sh
-      - run: shellcheck skills/imessage-review/bootstrap.sh skills/imessage-review/install.sh skills/imessage-review/install-hardened.sh skills/imessage-review/uninstall.sh skills/imessage-review/uninstall-hardened.sh
+      - run: bash -n skills/imessage-review/bootstrap.sh skills/imessage-review/install.sh skills/imessage-review/install-hardened.sh skills/imessage-review/uninstall.sh skills/imessage-review/uninstall-hardened.sh skills/imessage-review/tools/select_python.sh
+      - run: shellcheck skills/imessage-review/bootstrap.sh skills/imessage-review/install.sh skills/imessage-review/install-hardened.sh skills/imessage-review/uninstall.sh skills/imessage-review/uninstall-hardened.sh skills/imessage-review/tools/select_python.sh
 
   macos:
     runs-on: macos-latest
