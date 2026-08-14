@@ -187,6 +187,65 @@ class DoctorTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["checks"]["bridge_root"]["status"], "fail")
 
+    def test_unreadable_chat_db_is_a_nonfatal_shell_access_warning(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="claude-imessage-doctor-") as td:
+            root = Path(os.path.realpath(td))
+            bridge = root / "bridge"
+            for directory in (
+                bridge / "bin",
+                bridge / "control" / "requests",
+                bridge / "control" / "responses",
+                bridge / "contacts",
+            ):
+                directory.mkdir(parents=True, mode=0o700)
+            bridge.chmod(0o700)
+            for name in ("helper.py", "send_gate.py"):
+                path = bridge / "bin" / name
+                path.write_text("# fixture\n")
+                path.chmod(0o500)
+            for name in (
+                "claude-cowork-imessage-helper",
+                "claude-cowork-imessage-confirm",
+            ):
+                path = bridge / "bin" / name
+                path.write_text("fixture")
+                path.chmod(0o700)
+            for name, contents in (
+                ("blocked_chats.txt", ""),
+                ("allowed_chats.txt", ""),
+                ("read_policy.txt", "blocklist\n"),
+            ):
+                path = bridge / "contacts" / name
+                path.write_text(contents)
+                path.chmod(0o600)
+            log = bridge / "control" / "log.txt"
+            log.write_text("")
+            log.chmod(0o600)
+            home = root / "home"
+            home.mkdir()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SKILL_ROOT / "tools" / "doctor.py"),
+                    "--bridge",
+                    str(bridge),
+                    "--json",
+                    "--skip-launchd",
+                    "--skip-codesign",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={**os.environ, "HOME": str(home)},
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["checks"]["chat_db"]["status"], "warn")
+        self.assertIn("does not test wrapper FDA", report["checks"]["chat_db"]["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

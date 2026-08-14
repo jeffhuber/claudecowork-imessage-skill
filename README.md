@@ -172,6 +172,8 @@ must receive Full Disk Access.
 Grant Full Disk Access to the exact wrapper printed by the installer. The first
 approved send separately prompts for Automation access to Messages. Then run
 the printed `doctor.py` command and follow [the smoke test](docs/SMOKE_TEST.md).
+The doctor can only test whether its own shell process reads `chat.db`; the
+smoke test is the authoritative check of the wrapper's Full Disk Access grant.
 
 ## Sending
 

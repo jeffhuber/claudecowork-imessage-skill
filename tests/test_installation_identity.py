@@ -57,18 +57,49 @@ class PackagingTests(unittest.TestCase):
                 self.assertNotEqual(failed.returncode, 0, invalid)
                 self.assertEqual(failed.stdout, "", invalid)
 
-            for name in ("install.sh", "install-hardened.sh"):
-                source = (SKILL_ROOT / name).read_text(encoding="utf-8")
-                self.assertIn('source "$PYTHON_SELECTOR"', source, name)
-                self.assertIn(
-                    'PYTHON3_PATH="$(find_supported_python)"', source, name
-                )
+            standard = (SKILL_ROOT / "install.sh").read_text(encoding="utf-8")
             hardened = (SKILL_ROOT / "install-hardened.sh").read_text(
                 encoding="utf-8"
             )
+            self.assertIn('source "$PYTHON_SELECTOR"', standard)
+            self.assertIn('source "$PYTHON_SELECTOR"', hardened)
+            self.assertIn('PYTHON3_PATH="$(find_supported_python)"', standard)
+            self.assertIn('PYTHON3_PATH="$(find_supported_python 1)"', hardened)
             self.assertIn(
                 'hardened_python_is_trusted "$PYTHON3_PATH"', hardened
             )
+
+    def test_hardened_selection_rejects_before_executing_untrusted_override(self) -> None:
+        selector = SKILL_ROOT / "tools" / "select_python.sh"
+        with tempfile.TemporaryDirectory(prefix="claude-python-marker-") as td:
+            root = Path(td)
+            marker = root / "executed"
+            candidate = root / "python3"
+            candidate.write_text(
+                '#!/bin/sh\nprintf "executed\\n" > "$MARKER"\nexit 0\n',
+                encoding="utf-8",
+            )
+            candidate.chmod(0o755)
+            env = os.environ.copy()
+            env["IMESSAGE_PYTHON"] = str(candidate)
+            env["MARKER"] = str(marker)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; find_supported_python 1',
+                    "selector-test",
+                    str(selector),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+            executed = marker.exists()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(executed)
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS stat semantics")
     def test_hardened_python_rejects_user_writable_paths(self) -> None:
