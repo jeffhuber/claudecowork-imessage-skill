@@ -211,6 +211,63 @@ class PackagingTests(unittest.TestCase):
             ):
                 self.assertTrue(os.access(bridge / relative, os.X_OK), relative)
 
+    def test_bootstrap_atomically_upgrades_read_only_installed_assets(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="claude-imessage-bootstrap-") as td:
+            bridge = Path(td) / "bridge"
+            command = ["bash", str(SKILL_ROOT / "bootstrap.sh"), str(bridge)]
+            first = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(first.returncode, 0, first.stderr)
+
+            for name in ("helper.py", "send_gate.py"):
+                (bridge / "bin" / name).chmod(0o500)
+            second = subprocess.run(command, capture_output=True, text=True, check=False)
+
+            self.assertEqual(second.returncode, 0, second.stderr)
+            for name in ("helper.py", "send_gate.py"):
+                self.assertEqual(
+                    (bridge / "bin" / name).read_bytes(),
+                    (SKILL_ROOT / "bin" / name).read_bytes(),
+                )
+
+    def test_bootstrap_rejects_symlinked_asset_destination(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="claude-imessage-bootstrap-") as td:
+            root = Path(td)
+            bridge = root / "bridge"
+            (bridge / "bin").mkdir(parents=True)
+            victim = root / "victim"
+            victim.write_text("unchanged\n")
+            (bridge / "bin" / "helper.py").symlink_to(victim)
+
+            result = subprocess.run(
+                ["bash", str(SKILL_ROOT / "bootstrap.sh"), str(bridge)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(victim.read_text(), "unchanged\n")
+            self.assertIn("unsafe bootstrap destination", result.stderr)
+
+    def test_bootstrap_rejects_symlinked_bridge_with_trailing_separator(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="claude-imessage-bootstrap-") as td:
+            root = Path(td)
+            target = root / "target"
+            target.mkdir()
+            bridge = root / "bridge-link"
+            bridge.symlink_to(target, target_is_directory=True)
+
+            result = subprocess.run(
+                ["bash", str(SKILL_ROOT / "bootstrap.sh"), f"{bridge}/"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(list(target.iterdir()), [])
+            self.assertIn("not a symlink", result.stderr)
+
     def test_claude_identity_does_not_claim_grok_resources(self) -> None:
         for name in (
             "install.sh",

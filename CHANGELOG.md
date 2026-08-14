@@ -17,6 +17,8 @@ reported by the `status` action.
   upgrade, release-integrity, and host-support documentation.
 - Require a GitHub-verified signed tag and draft-first publication for immutable
   release assets.
+- Make repeated Claude bridge bootstraps atomically replace the helper's
+  intentionally read-only installed files while rejecting unsafe destinations.
 
 ## 1.2.1 - 2026-08-13
 
