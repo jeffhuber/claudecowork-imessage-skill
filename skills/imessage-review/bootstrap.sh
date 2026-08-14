@@ -11,6 +11,9 @@ if [[ -z "$DESTINATION" ]]; then
     exit 2
 fi
 
+while [[ "$DESTINATION" != "/" && "$DESTINATION" == */ ]]; do
+    DESTINATION="${DESTINATION%/}"
+done
 if [[ -L "$DESTINATION" || (-e "$DESTINATION" && ! -d "$DESTINATION") ]]; then
     echo "Error: bridge must be a regular directory, not a symlink: $DESTINATION" >&2
     exit 1

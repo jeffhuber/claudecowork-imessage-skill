@@ -249,6 +249,25 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(victim.read_text(), "unchanged\n")
             self.assertIn("unsafe bootstrap destination", result.stderr)
 
+    def test_bootstrap_rejects_symlinked_bridge_with_trailing_separator(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="claude-imessage-bootstrap-") as td:
+            root = Path(td)
+            target = root / "target"
+            target.mkdir()
+            bridge = root / "bridge-link"
+            bridge.symlink_to(target, target_is_directory=True)
+
+            result = subprocess.run(
+                ["bash", str(SKILL_ROOT / "bootstrap.sh"), f"{bridge}/"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(list(target.iterdir()), [])
+            self.assertIn("not a symlink", result.stderr)
+
     def test_claude_identity_does_not_claim_grok_resources(self) -> None:
         for name in (
             "install.sh",
