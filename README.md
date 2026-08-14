@@ -2,6 +2,9 @@
 
 Read, search, and analyze your iMessages on macOS from inside Claude Cowork.
 
+This is an independent open-source project by Jeff Huber. It is not made,
+endorsed, or supported by Apple or Anthropic.
+
 **Security**: See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## What's in the box
@@ -97,10 +100,14 @@ parity across the three repositories through `shared-core.json` and CI. See
 
 ### 1. Install the plugin
 
-Download `imessage-review.plugin` and `SHA256SUMS` from the
-[latest release](../../releases/latest), verify the checksum, then install the
-plugin in Claude Cowork. Release archives contain source only; the macOS
-binaries are compiled and signed locally.
+Download every asset from the [latest release](../../releases/latest), run
+`shasum -a 256 -c SHA256SUMS`, then install the
+plugin in Claude Desktop: open **Cowork > Customize > Plugins**, choose the
+custom-plugin upload action, and select `imessage-review.plugin`. Availability
+of Cowork and custom plugins depends on your Claude plan and workspace policy;
+see [Anthropic's plugin instructions](https://support.claude.com/en/articles/13837440-use-plugins-in-claude).
+Release archives contain source only; the macOS binaries are compiled and
+signed locally.
 
 To build the plugin from source:
 
@@ -403,10 +410,7 @@ an independent native confirmation dialog showing the complete message.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md). Version 1.1 aligns the Claude helper with the
-Grok sibling: independent identities, native send confirmation, no-follow
-runtime paths, consistent SQLite snapshots, diagnostics, and the optional
-root-owned/default-deny trust model.
+See [CHANGELOG.md](CHANGELOG.md) for release notes and version history.
 
 ## Uninstall
 
@@ -414,6 +418,16 @@ Run `./uninstall-hardened.sh` for a hardened install or `./uninstall.sh` for a
 standard install. Both remove only Claude's LaunchAgent and preserve runtime
 data until you deliberately delete it. Revoke `claude-cowork-imessage-helper`
 under Full Disk Access and Automation for a complete teardown.
+
+## Upgrading
+
+Download and verify the new `imessage-review.plugin` and `SHA256SUMS`, review
+`CHANGELOG.md`, then replace the custom plugin in Claude Cowork. Bootstrap into
+the same dedicated bridge and rerun the same installer mode you previously
+used. Restart Claude Desktop, run the installer-printed doctor command, and
+complete [the smoke test](docs/SMOKE_TEST.md). Regrant Full Disk Access only if
+macOS no longer recognizes the rebuilt wrapper; the installer prints its exact
+path.
 
 ## Upgrading from the legacy LaunchAgent
 
@@ -427,15 +441,18 @@ Access and Automation approval once more.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v
-python3 tools/check_version.py v1.1.0
-bash -n skills/imessage-review/*.sh
-shellcheck skills/imessage-review/*.sh
+./tools/test.sh
+bash -n skills/imessage-review/*.sh \
+  skills/imessage-review/tools/select_python.sh tools/test.sh
+shellcheck skills/imessage-review/*.sh \
+  skills/imessage-review/tools/select_python.sh tools/test.sh
 ```
 
-CI also compiles the C and Objective-C helpers with warnings as errors, lints
-the LaunchAgent plist, and tests Python 3.9, 3.11, and 3.13. See
-`tests/README.md` for coverage details.
+`tools/test.sh` selects and prints one supported Python interpreter before any
+test runs, so an unsupported `python3` earlier on `PATH` cannot produce a
+misleading full-suite failure. CI also compiles the C and Objective-C helpers
+with warnings as errors, lints the LaunchAgent plist, and tests Python 3.9,
+3.11, and 3.13. See `tests/README.md` for coverage details.
 
 ## License
 

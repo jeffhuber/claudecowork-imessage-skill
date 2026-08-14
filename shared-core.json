@@ -5,7 +5,7 @@
     "host_display_name": "Claude Cowork",
     "wrapper_name": "claude-cowork-imessage-helper",
     "confirmation_name": "claude-cowork-imessage-confirm",
-    "helper_version": "1.2.1",
+    "helper_version": "1.2.2",
     "product_id": "claudecowork-imessage",
     "launchd_label": "com.jeffhuber.claudecowork-imessage"
   },

@@ -65,9 +65,25 @@ class PackagingTests(unittest.TestCase):
             self.assertIn('source "$PYTHON_SELECTOR"', hardened)
             self.assertIn('PYTHON3_PATH="$(find_supported_python 0)"', standard)
             self.assertIn('PYTHON3_PATH="$(find_supported_python 1)"', hardened)
+            self.assertIn("absolute path to a supported interpreter", standard)
+            self.assertIn("absolute trusted path", hardened)
             self.assertIn(
                 'hardened_python_is_trusted "$PYTHON3_PATH"', hardened
             )
+
+    def test_test_runner_rejects_a_relative_interpreter_override(self) -> None:
+        env = os.environ.copy()
+        env["IMESSAGE_TEST_PYTHON"] = "python3"
+        result = subprocess.run(
+            ["bash", str(REPO_ROOT / "tools" / "test.sh")],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("absolute path", result.stderr)
 
     def test_hardened_selection_rejects_before_executing_untrusted_override(self) -> None:
         selector = SKILL_ROOT / "tools" / "select_python.sh"
