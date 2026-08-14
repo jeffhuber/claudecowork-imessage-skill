@@ -187,7 +187,7 @@ class DoctorTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["checks"]["bridge_root"]["status"], "fail")
 
-    def test_unreadable_chat_db_is_a_nonfatal_shell_access_warning(self) -> None:
+    def test_readable_chat_db_is_a_nonfatal_wrapper_fda_warning(self) -> None:
         with tempfile.TemporaryDirectory(prefix="claude-imessage-doctor-") as td:
             root = Path(os.path.realpath(td))
             bridge = root / "bridge"
