@@ -6,6 +6,10 @@ reported by the `status` action.
 
 ## Unreleased
 
+- Publish a plugin marketplace manifest so the plugin installs and updates in
+  place from this repository; release checks enforce that the manifest stays
+  consistent with `plugin.json` and never pins its own version.
+
 ## 1.2.2 - 2026-08-14
 
 - Harden hardened-install Python selection by validating interpreter ownership

@@ -109,6 +109,21 @@ see [Anthropic's plugin instructions](https://support.claude.com/en/articles/138
 Release archives contain source only; the macOS binaries are compiled and
 signed locally.
 
+Alternatively, install through the plugin marketplace this repository
+publishes, which picks up new releases in place instead of the
+remove-and-reupload cycle of file installs. In Claude Code:
+
+```
+/plugin marketplace add jeffhuber/claudecowork-imessage-skill
+/plugin install imessage-review@jeffhuber-plugins
+/plugin marketplace update jeffhuber-plugins   # refresh after a new release
+```
+
+On Team and Enterprise plans, an organization Owner can add this repository
+as a GitHub plugin source under **Organization settings > Plugins**; members
+then install and update it from **Browse plugins**. Personal-plan Cowork
+currently supports custom plugins only through the file upload above.
+
 To build the plugin from source:
 
 ```

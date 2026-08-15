@@ -44,6 +44,7 @@ printf 'Test interpreter: %s (%s)\n' \
 "$TEST_PYTHON" -m unittest discover -s tests -v
 "$TEST_PYTHON" tools/check_shared_core.py
 "$TEST_PYTHON" -m json.tool .claude-plugin/plugin.json >/dev/null
+"$TEST_PYTHON" -m json.tool .claude-plugin/marketplace.json >/dev/null
 
 if [[ "$#" -eq 1 ]]; then
     "$TEST_PYTHON" tools/check_version.py "$1"

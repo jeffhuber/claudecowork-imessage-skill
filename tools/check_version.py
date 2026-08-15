@@ -96,6 +96,53 @@ def check_changelog(expected_version: str) -> tuple[bool, str]:
     return True, ""
 
 
+def check_marketplace() -> tuple[bool, str]:
+    """Verify the marketplace manifest stays consistent with plugin.json.
+
+    The marketplace entry must not carry its own version: the version is
+    pinned by plugin.json alone, so every release that bumps plugin.json
+    flows to marketplace installs without a second edit to forget.
+    """
+    path = REPO_ROOT / ".claude-plugin" / "marketplace.json"
+    if not path.is_file():
+        return False, f"marketplace manifest not found at {path}"
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        return False, f"marketplace.json is not valid JSON: {error}"
+
+    if not isinstance(manifest.get("name"), str) or not manifest["name"]:
+        return False, "marketplace.json must set a non-empty name"
+    owner = manifest.get("owner")
+    if not isinstance(owner, dict) or not isinstance(owner.get("name"), str):
+        return False, "marketplace.json must set owner.name"
+
+    plugin = json.loads(
+        (REPO_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )
+    entries = manifest.get("plugins")
+    if not isinstance(entries, list) or len(entries) != 1:
+        return False, "marketplace.json must list exactly one plugin entry"
+    entry = entries[0]
+    if entry.get("name") != plugin.get("name"):
+        return (
+            False,
+            f"marketplace entry name {entry.get('name')!r} does not match "
+            f"plugin.json name {plugin.get('name')!r}",
+        )
+    if entry.get("source") != "./":
+        return False, "marketplace entry source must be \"./\" (this repository)"
+    if entry.get("description") != plugin.get("description"):
+        return False, "marketplace entry description differs from plugin.json"
+    if "version" in entry:
+        return (
+            False,
+            "marketplace entry must not set version; plugin.json is the "
+            "single version source",
+        )
+    return True, ""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tag", help="release tag, for example v1.1.0")
@@ -116,6 +163,10 @@ def main() -> int:
     changelog_ok, changelog_error = check_changelog(expected)
     if not changelog_ok:
         print(changelog_error)
+        return 1
+    marketplace_ok, marketplace_error = check_marketplace()
+    if not marketplace_ok:
+        print(marketplace_error)
         return 1
     print(f"release versions match {args.tag}")
     return 0
