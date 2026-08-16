@@ -19,7 +19,7 @@
       "logical_name": "helper.py",
       "path": "skills/imessage-review/bin/helper.py",
       "normalization": "identity",
-      "sha256": "eeffb0ff75572b0c080ef87fe9f0a698759d82d385f0d40b74c21baf5d658bcb"
+      "sha256": "013cc8f0dc1302cd7f9b11e6fcfd4da88dc4d8043077a300e9da79cd2ed5136d"
     },
     {
       "logical_name": "send_gate.py",
