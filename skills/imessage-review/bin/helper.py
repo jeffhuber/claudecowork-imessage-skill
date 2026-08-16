@@ -113,18 +113,6 @@ _PRODUCT_ENV_VARS = (
 )
 WRAPPER_MODE = "product" if any(v in os.environ for v in _PRODUCT_ENV_VARS) else "baked"
 
-# Bridge role: host (default), manager, or an unknown value that fails closed.
-_BRIDGE_ROLE_ENV = "IMESSAGE_BRIDGE_ROLE"
-DEFAULT_BRIDGE_ROLE = "host"
-
-
-def _read_bridge_role() -> str:
-    value = os.environ.get(_BRIDGE_ROLE_ENV, "")
-    return value.strip().lower() or DEFAULT_BRIDGE_ROLE
-
-
-BRIDGE_ROLE = _read_bridge_role()
-
 HELPER_VERSION = "1.2.2"
 PROTOCOL_VERSION = "1.2"
 
@@ -133,6 +121,8 @@ PROTOCOL_VERSION = "1.2"
 # place `list_chats` is served, and it never serves body-returning actions.
 # The table below is enforced in the worker; hiding an action in a host or
 # app layer is not sufficient. Unknown role values fail closed.
+_BRIDGE_ROLE_ENV = "IMESSAGE_BRIDGE_ROLE"
+DEFAULT_BRIDGE_ROLE = "host"
 _HOST_ACTIONS = (
     "status",
     "review",
@@ -152,7 +142,8 @@ ROLE_ACTIONS: dict[str, tuple[str, ...]] = {
 
 def bridge_role() -> str:
     """Return the configured bridge role (unvalidated; see allowed_actions)."""
-    return _read_bridge_role()
+    value = os.environ.get(_BRIDGE_ROLE_ENV, "")
+    return value.strip().lower() or DEFAULT_BRIDGE_ROLE
 
 
 def allowed_actions(role: str | None = None) -> tuple[str, ...]:
@@ -179,6 +170,8 @@ def _load_sibling(name: str):
 
 
 def _load_send_gate():
+    # Wrapper validate_file covers SEND_GATE_PATH ownership and permissions;
+    # we load by absolute path to honor IMESSAGE_SEND_GATE_PATH override.
     spec = _importlib_util.spec_from_file_location("send_gate", SEND_GATE_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"failed to load send_gate from {SEND_GATE_PATH}")
@@ -211,6 +204,7 @@ MAX_SEARCH_LEN = 200
 MAX_LIST_CHATS_DAYS = 3650
 LIST_CHATS_DEFAULT_DAYS = 365
 LIST_CHATS_DEFAULT_LIMIT = 200
+LIST_CHATS_FILTER_SCAN_LIMIT = 500
 MAX_LIST_CHATS_QUERY_LEN = 100
 MAX_LIST_CHATS_PARTICIPANTS = 10
 MAX_TEXT_SNIPPET = 600
@@ -763,38 +757,44 @@ def load_privacy_policy() -> PrivacyPolicy:
     # Manager role: no policy files loaded
     if bridge_role() == "manager":
         return PrivacyPolicy(mode="blocklist", blocklist=(), allowlist=())
-    
+
     mode_override = os.environ.get("COWORK_IMESSAGE_READ_POLICY", "runtime")
     if mode_override in ("allowlist", "blocklist"):
         mode = mode_override
     else:
-        try:
-            # In product mode, also apply uid owner check to read_policy.txt
-            if WRAPPER_MODE == "product":
-                try:
-                    metadata = READ_POLICY_PATH.lstat()
-                    if not stat.S_ISREG(metadata.st_mode):
-                        log(f"privacy policy rejected: {READ_POLICY_PATH} must be a regular file")
-                        raise FileNotFoundError()
-                    if metadata.st_uid != os.getuid():
-                        log(f"privacy policy rejected: {READ_POLICY_PATH} must be owned by the current user (uid {os.getuid()})")
-                        raise FileNotFoundError()
-                    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-                        log(f"privacy policy rejected: {READ_POLICY_PATH} must not be group/world-writable")
-                        raise FileNotFoundError()
-                except FileNotFoundError:
-                    # Product mode: missing or bad read_policy.txt defaults to allowlist (fail closed)
+        # Product mode: apply permission check to read_policy.txt
+        can_read_policy = True
+        if WRAPPER_MODE == "product":
+            try:
+                metadata = READ_POLICY_PATH.lstat()
+                if not stat.S_ISREG(metadata.st_mode):
+                    log(f"read_policy.txt rejected: must be a regular file")
+                    can_read_policy = False
+                elif metadata.st_uid != os.getuid():
+                    log(f"read_policy.txt rejected: must be owned by current user (uid {os.getuid()})")
+                    can_read_policy = False
+                elif metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    log(f"read_policy.txt rejected: must not be group/world-writable")
+                    can_read_policy = False
+            except FileNotFoundError:
+                can_read_policy = False
+
+        if can_read_policy:
+            try:
+                mode = READ_POLICY_PATH.read_text(encoding="utf-8").strip().lower()
+            except FileNotFoundError:
+                # Product mode: missing read_policy.txt defaults to allowlist (fail closed)
+                if WRAPPER_MODE == "product":
                     mode = "allowlist"
                 else:
-                    mode = READ_POLICY_PATH.read_text(encoding="utf-8").strip().lower()
-            else:
-                mode = READ_POLICY_PATH.read_text(encoding="utf-8").strip().lower()
-        except FileNotFoundError:
-            # Product mode: missing read_policy.txt defaults to allowlist (fail closed)
+                    mode = "blocklist"
+        else:
+            # Product mode: permission check failed, treat as missing → allowlist (fail closed)
             if WRAPPER_MODE == "product":
                 mode = "allowlist"
             else:
                 mode = "blocklist"
+
         if mode not in ("allowlist", "blocklist"):
             log(f"invalid read policy {mode!r}; failing closed in allowlist mode")
             mode = "allowlist"
@@ -816,7 +816,7 @@ def load_blocklist() -> list[str]:
 
 def is_send_policy_enabled() -> bool:
     """Check if send_policy.json enables sending. Product mode only; DIY always returns True."""
-    if "IMESSAGE_POLICY_DIR" not in os.environ:
+    if WRAPPER_MODE != "product":
         return True
     try:
         metadata = SEND_POLICY_PATH.lstat()
@@ -1618,13 +1618,20 @@ def action_list_chats(params, conn, contacts, privacy_policy):
         GROUP BY c.ROWID
         ORDER BY MAX(m.date) DESC
         """
-    if query is None and include_groups:
+    post_filtering = query is not None or not include_groups
+    candidate_limit = limit if not post_filtering else max(limit + 1, LIST_CHATS_FILTER_SCAN_LIMIT)
+    if not post_filtering:
         # No post-filtering: let SQLite stop after limit+1 rows so we can
         # report truncation without pulling every chat.
         cur.execute(sql + " LIMIT ?", (cutoff_ns, limit + 1))
     else:
-        cur.execute(sql, (cutoff_ns,))
+        # Query/group filters happen after participant labels are assembled.
+        # Bound the candidate scan anyway so filtered requests cannot walk a
+        # whole large chat database before returning no matches.
+        cur.execute(sql + " LIMIT ?", (cutoff_ns, candidate_limit + 1))
     rows = cur.fetchall()
+    candidate_truncated = len(rows) > candidate_limit
+    rows = rows[:candidate_limit]
 
     # Participants only for the candidate chats (bounded by LIMIT above), not
     # a full chat_handle_join scan.
@@ -1674,7 +1681,7 @@ def action_list_chats(params, conn, contacts, privacy_policy):
         if len(items) > limit:
             break
 
-    truncated = len(items) > limit
+    truncated = len(items) > limit or candidate_truncated
     items = items[:limit]
     return {
         "window_days": days,
@@ -1687,21 +1694,15 @@ def action_list_chats(params, conn, contacts, privacy_policy):
 def action_status(params, conn, contacts, privacy_policy):
     """Return compatibility and local-install status without reading messages."""
     policy = _coerce_policy(privacy_policy)
-    # Role-based allowed actions
-    if bridge_role() == "manager":
-        allowed = ["status", "contacts_lookup", "list_chats"]
-    else:
-        allowed = ["status", "review", "search", "chat_history", "response_stats", 
-                   "contacts_lookup", "send_preview", "send"]
     return {
         "helper_version": HELPER_VERSION,
         "protocol_version": PROTOCOL_VERSION,
+        "bridge_role": bridge_role(),
+        "allowed_actions": sorted(allowed_actions()),
         "product_id": PRODUCT_ID,
         "wrapper_mode": WRAPPER_MODE,
         "host_display_name": HOST_DISPLAY_NAME,
         "launchd_label": "com.jeffhuber.claudecowork-imessage" if WRAPPER_MODE == "baked" else None,
-        "bridge_role": bridge_role(),
-        "allowed_actions": sorted(allowed_actions()),
         "confirmation_helper_path": str(CONFIRM_HELPER_PATH),
         "code_root": str(CODE_ROOT),
         "bridge_root": str(BRIDGE_ROOT),
@@ -1756,8 +1757,8 @@ def action_send_preview(params, conn, contacts, privacy_policy):
     rejected helper-side.
     """
     if not is_send_policy_enabled():
-        raise ValueError("sending is disabled by policy (send_policy.json)")
-    
+        raise ValueError("send operations are disabled by policy")
+
     to = validate_send_recipient(params.get("to"))
     text = validate_send_text(params.get("text"))
     service = validate_service(params.get("service"))
@@ -1801,8 +1802,8 @@ def action_send(params, conn, contacts, privacy_policy):
     input is ever interpolated into that slot.
     """
     if not is_send_policy_enabled():
-        raise ValueError("sending is disabled by policy (send_policy.json)")
-    
+        raise ValueError("send operations are disabled by policy")
+
     to = validate_send_recipient(params.get("to"))
     text = validate_send_text(params.get("text"))
     service = validate_service(params.get("service"))
@@ -2093,31 +2094,47 @@ def process_request(
             cleanup_tmpdb(db_path)
 
 
-def _acquire_bridge_lock(control_fd: int, timeout_s: float = 5.0) -> int:
+def _acquire_bridge_lock(control_fd: int, timeout_s: float = OSASCRIPT_TIMEOUT_S + 10.0) -> int:
     """Acquire an exclusive lock on control/lock with bounded wait.
-    
+
     Returns the lock file descriptor on success. The caller must close it
     to release the lock. Raises RuntimeError on timeout or failure.
     """
-    lock_fd = os.open(
-        "lock",
-        os.O_CREAT | os.O_RDWR | _FILE_NOFOLLOW_FLAGS,
-        0o600,
-        dir_fd=control_fd,
-    )
+    open_deadline = time.time() + timeout_s
+    while True:
+        try:
+            lock_fd = os.open(
+                "lock",
+                os.O_CREAT | os.O_RDWR | _FILE_NOFOLLOW_FLAGS,
+                0o600,
+                dir_fd=control_fd,
+            )
+            break
+        except FileNotFoundError:
+            if time.time() >= open_deadline:
+                message = "could not create bridge lock file"
+                log(message)
+                raise RuntimeError(message)
+            time.sleep(0.01)
+        except OSError as exc:
+            message = f"could not open bridge lock file: {exc}"
+            log(message)
+            raise RuntimeError(message) from exc
     try:
         _validate_regular_file(lock_fd, "control/lock", private=True)
-    except UnsafeRuntimePath:
+    except Exception as exc:
         os.close(lock_fd)
-        raise
-    
+        message = f"unsafe bridge lock file: {exc}"
+        log(message)
+        raise RuntimeError(message) from exc
+
     # Try non-blocking lock first
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return lock_fd
     except (OSError, BlockingIOError):
         pass
-    
+
     # Lock is held; poll with bounded wait
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -2127,12 +2144,14 @@ def _acquire_bridge_lock(control_fd: int, timeout_s: float = 5.0) -> int:
             return lock_fd
         except (OSError, BlockingIOError):
             continue
-    
-    os.close(lock_fd)
-    raise RuntimeError(
+
+    message = (
         f"could not acquire bridge lock within {timeout_s}s timeout; "
         "another worker is processing this bridge"
     )
+    log(message)
+    os.close(lock_fd)
+    raise RuntimeError(message)
 
 
 def main() -> None:
@@ -2157,9 +2176,13 @@ def main() -> None:
     # Hold for the entire drain; re-list requests once after acquiring to
     # catch any that arrived during the lock wait. The lock is released
     # automatically when lock_fd is closed on exit.
-    with _private_directory_fd(LOG_PATH.parent) as control_fd:
-        lock_fd = _acquire_bridge_lock(control_fd)
-    
+    try:
+        with _private_directory_fd(LOG_PATH.parent) as control_fd:
+            lock_fd = _acquire_bridge_lock(control_fd)
+    except RuntimeError as e:
+        log(f"bridge lock unavailable, deferring drain: {e}")
+        return
+
     try:
         # Only process complete request files (*.json, not temp/partial suffixes).
         with _private_directory_fd(REQUESTS_DIR) as requests_fd:
