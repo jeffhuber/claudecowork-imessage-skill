@@ -6,6 +6,8 @@ reported by the `status` action.
 
 ## Unreleased
 
+## 1.3.0 - 2026-08-16
+
 - Bridge protocol 1.2: add the `list_chats` action, which enumerates threads
   with recent activity for policy discovery and never selects message bodies
   (a sentinel-body fixture asserts this); add worker-enforced bridge roles
@@ -14,6 +16,21 @@ reported by the `status` action.
   and unknown roles serve nothing; `status` reports `bridge_role` and
   `allowed_actions`. DIY installs are unaffected: nothing sets the role, so
   every existing action behaves as before.
+- CORE-5a follow-ups (claudecowork #28, port of chatgpt #35): `read_policy.txt`
+  applies the same uid/mode ownership check as `list_chats`; root-owned files
+  satisfy `require_uid_owner` with defense-in-depth against unowned policy;
+  `_load_send_gate()` validates ownership before import; env-plumbing re-import
+  test uses `os.path.realpath()` for symlink-safe comparison.
+- CORE-8: align Claude helper parity with chatgpt-codex and grokbot-imessage-skill
+  for shared-core coordination.
+- CORE-6: per-bridge flock in `helper.py` main() for safe concurrent operation
+  when multiple bridges exist on one host.
+- CORE-5b: role gating, `send_policy.txt`, manager bridges run without nonces.
+- CORE-5a: product-mode environment and paths validated before every helper invocation.
+- CORE-4: product seal validation during wrapper setup.
+- CORE-3: product-mode path derivation parity.
+- CORE-2: product-mode wrapper parity.
+- Fix attributedBody span decoding for messages with rich text formatting.
 
 ## 1.2.2 - 2026-08-14
 
