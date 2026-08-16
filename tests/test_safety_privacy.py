@@ -767,5 +767,100 @@ print("OK")
         self.assertIn("OK", completed.stdout)
 
 
+class BridgeLockTests(BridgeDirMixin, unittest.TestCase):
+    """Test per-bridge flock serialization (CORE-6)."""
+
+    def test_two_workers_each_process_one_request(self) -> None:
+        """Two concurrent workers on same bridge each process exactly one request."""
+        bridge = Path(os.path.realpath(self._tmp.name))
+        bridge.chmod(0o700)
+        control_dir = bridge / "control"
+        requests_dir = control_dir / "requests"
+        responses_dir = control_dir / "responses"
+        for path in (requests_dir, responses_dir):
+            path.mkdir(parents=True, mode=0o700)
+        control_dir.chmod(0o700)
+
+        # Plant two requests
+        req1 = requests_dir / "request-worker1.json"
+        req2 = requests_dir / "request-worker2.json"
+        req1.write_text(json.dumps({"id": "worker1", "action": "status", "params": {}}))
+        req2.write_text(json.dumps({"id": "worker2", "action": "status", "params": {}}))
+        req1.chmod(0o600)
+        req2.chmod(0o600)
+
+        # Worker script that runs helper.main()
+        worker_script = f"""
+import os
+import sys
+os.environ["IMESSAGE_BRIDGE_DIR"] = "{bridge}"
+os.environ["IMESSAGE_BRIDGE_ROLE"] = "host"
+sys.path.insert(0, "tests")
+from _helper_loader import helper
+try:
+    helper.main()
+except Exception as e:
+    sys.stderr.write(f"worker error: {{e}}\\n")
+    sys.exit(1)
+"""
+        
+        # Run two workers concurrently
+        import multiprocessing
+        ctx = multiprocessing.get_context("fork")
+        proc1 = ctx.Process(target=lambda: subprocess.run(
+            [sys.executable, "-c", worker_script],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        ))
+        proc2 = ctx.Process(target=lambda: subprocess.run(
+            [sys.executable, "-c", worker_script],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        ))
+        
+        proc1.start()
+        proc2.start()
+        proc1.join(timeout=10)
+        proc2.join(timeout=10)
+
+        # Both requests should be processed
+        self.assertFalse(req1.exists(), "request-worker1.json should be deleted")
+        self.assertFalse(req2.exists(), "request-worker2.json should be deleted")
+
+        # Both responses should exist
+        resp1 = responses_dir / "response-worker1.json"
+        resp2 = responses_dir / "response-worker2.json"
+        self.assertTrue(resp1.exists(), "response-worker1.json should exist")
+        self.assertTrue(resp2.exists(), "response-worker2.json should exist")
+
+        # Verify responses have correct ids
+        data1 = json.loads(resp1.read_text())
+        data2 = json.loads(resp2.read_text())
+        self.assertEqual(data1["id"], "worker1")
+        self.assertEqual(data2["id"], "worker2")
+        self.assertTrue(data1["ok"])
+        self.assertTrue(data2["ok"])
+
+    def test_lock_timeout_raises_error(self) -> None:
+        """Lock acquisition timeout raises RuntimeError."""
+        bridge = Path(os.path.realpath(self._tmp.name))
+        bridge.chmod(0o700)
+        control_dir = bridge / "control"
+        control_dir.mkdir(mode=0o700)
+
+        with mock.patch.object(helper, "BRIDGE_ROOT", bridge):
+            with helper._private_directory_fd(control_dir) as control_fd:
+                # Acquire lock in parent
+                lock_fd = helper._acquire_bridge_lock(control_fd, timeout_s=0.2)
+                try:
+                    # Try to acquire in same process with short timeout
+                    with self.assertRaisesRegex(RuntimeError, "could not acquire bridge lock"):
+                        helper._acquire_bridge_lock(control_fd, timeout_s=0.2)
+                finally:
+                    os.close(lock_fd)
+
+
 if __name__ == "__main__":
     unittest.main()
