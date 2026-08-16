@@ -113,12 +113,17 @@ _PRODUCT_ENV_VARS = (
 )
 WRAPPER_MODE = "product" if any(v in os.environ for v in _PRODUCT_ENV_VARS) else "baked"
 
-# Bridge role: host (default) or manager
-_BRIDGE_ROLE_RAW = os.environ.get("IMESSAGE_BRIDGE_ROLE", "host").lower()
-if _BRIDGE_ROLE_RAW not in ("host", "manager"):
-    BRIDGE_ROLE = "host"
-else:
-    BRIDGE_ROLE = _BRIDGE_ROLE_RAW
+# Bridge role: host (default), manager, or an unknown value that fails closed.
+_BRIDGE_ROLE_ENV = "IMESSAGE_BRIDGE_ROLE"
+DEFAULT_BRIDGE_ROLE = "host"
+
+
+def _read_bridge_role() -> str:
+    value = os.environ.get(_BRIDGE_ROLE_ENV, "")
+    return value.strip().lower() or DEFAULT_BRIDGE_ROLE
+
+
+BRIDGE_ROLE = _read_bridge_role()
 
 HELPER_VERSION = "1.2.2"
 PROTOCOL_VERSION = "1.2"
@@ -128,8 +133,6 @@ PROTOCOL_VERSION = "1.2"
 # place `list_chats` is served, and it never serves body-returning actions.
 # The table below is enforced in the worker; hiding an action in a host or
 # app layer is not sufficient. Unknown role values fail closed.
-_BRIDGE_ROLE_ENV = "IMESSAGE_BRIDGE_ROLE"
-DEFAULT_BRIDGE_ROLE = "host"
 _HOST_ACTIONS = (
     "status",
     "review",
@@ -149,8 +152,7 @@ ROLE_ACTIONS: dict[str, tuple[str, ...]] = {
 
 def bridge_role() -> str:
     """Return the configured bridge role (unvalidated; see allowed_actions)."""
-    value = os.environ.get(_BRIDGE_ROLE_ENV, "")
-    return value.strip() or DEFAULT_BRIDGE_ROLE
+    return _read_bridge_role()
 
 
 def allowed_actions(role: str | None = None) -> tuple[str, ...]:
@@ -759,7 +761,7 @@ def _load_list(path: Path, require_root_owner: bool = False, require_uid_owner: 
 
 def load_privacy_policy() -> PrivacyPolicy:
     # Manager role: no policy files loaded
-    if BRIDGE_ROLE == "manager":
+    if bridge_role() == "manager":
         return PrivacyPolicy(mode="blocklist", blocklist=(), allowlist=())
     
     mode_override = os.environ.get("COWORK_IMESSAGE_READ_POLICY", "runtime")
@@ -1552,7 +1554,7 @@ def action_contacts_lookup(params, conn, contacts, privacy_policy):
     matches = []
     for handle, full_name in contacts.items():
         # Manager role: unfiltered contacts
-        if BRIDGE_ROLE != "manager" and not is_read_allowed(handle, handle, privacy_policy):
+        if bridge_role() != "manager" and not is_read_allowed(handle, handle, privacy_policy):
             continue
         if nl in full_name.lower():
             if "@" in handle:
@@ -1686,7 +1688,7 @@ def action_status(params, conn, contacts, privacy_policy):
     """Return compatibility and local-install status without reading messages."""
     policy = _coerce_policy(privacy_policy)
     # Role-based allowed actions
-    if BRIDGE_ROLE == "manager":
+    if bridge_role() == "manager":
         allowed = ["status", "contacts_lookup", "list_chats"]
     else:
         allowed = ["status", "review", "search", "chat_history", "response_stats", 
@@ -2145,7 +2147,7 @@ def main() -> None:
     # got a matching send (user cancelled, the host stopped before sending). Cheap; touches
     # only ~/imessage-bridge/nonces/ and only a few files at most.
     # Manager role: skip nonce reaping (no nonces directory created).
-    if BRIDGE_ROLE != "manager":
+    if bridge_role() != "manager":
         try:
             reap_expired_nonces()
         except Exception as e:
