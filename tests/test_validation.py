@@ -184,6 +184,7 @@ class ActionWhitelistTests(unittest.TestCase):
         "send_preview",
         "send",
         "status",
+        "list_chats",  # manager-role only; see test_list_chats.py
     })
 
     def test_action_set_is_exactly_expected(self):
