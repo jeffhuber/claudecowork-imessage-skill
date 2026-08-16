@@ -552,6 +552,15 @@ class ProductModeTests(unittest.TestCase):
         # Verify wrapper_mode is valid
         self.assertIn(status["wrapper_mode"], ("product", "baked"))
 
+    def test_action_status_hides_launchd_label_in_product_mode(self) -> None:
+        old_wrapper_mode = helper.WRAPPER_MODE
+        try:
+            helper.WRAPPER_MODE = "product"
+            status = helper.action_status({}, None, {}, helper.load_privacy_policy())
+            self.assertIsNone(status["launchd_label"])
+        finally:
+            helper.WRAPPER_MODE = old_wrapper_mode
+
 
 class BridgeRoleTests(unittest.TestCase):
     def setUp(self) -> None:
