@@ -575,7 +575,7 @@ class BridgeRoleTests(unittest.TestCase):
 import os
 import sys
 os.environ["IMESSAGE_BRIDGE_DIR"] = "/tmp/test-bridge"
-os.environ["IMESSAGE_BRIDGE_ROLE"] = "manager"
+os.environ["IMESSAGE_BRIDGE_ROLE"] = " manager "
 sys.path.insert(0, "tests")
 from _helper_loader import helper
 result = helper.action_status({}, None, {}, [])
