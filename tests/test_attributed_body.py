@@ -62,6 +62,20 @@ def _make_blob(body: bytes, *, with_nsobject: bool = False,
     return bytes(out)
 
 
+def _make_segmented_blob(*segments: bytes) -> bytes:
+    header = b"streamtyped\x00\x00\x00\x00\x00"
+    out = bytearray(header)
+    for segment in segments:
+        out += b"NSString\x01\x2b"
+        if len(segment) < 0x80:
+            out.append(len(segment))
+        else:
+            out.append(0x81)
+            out += struct.pack("<H", len(segment))
+        out += segment
+    return bytes(out)
+
+
 class DecodeAttributedBodyTests(unittest.TestCase):
 
     # ---- happy paths ------------------------------------------------------
@@ -98,6 +112,27 @@ class DecodeAttributedBodyTests(unittest.TestCase):
         blob = _make_blob(b"inside nsobject branch", with_nsobject=True)
         self.assertEqual(helper.decode_attributed_body(blob),
                          "inside nsobject branch")
+
+    def test_data_detected_span_segments_are_joined(self):
+        blob = _make_segmented_blob(
+            b"Call me at ",
+            b"(415) 555-0123",
+        )
+        self.assertEqual(
+            helper.decode_attributed_body(blob),
+            "Call me at (415) 555-0123",
+        )
+
+    def test_data_detector_metadata_after_gap_is_not_appended(self):
+        blob = (
+            _make_segmented_blob(b"Call me at ", b"(415) 555-0123")
+            + b"attribute-run"
+            + _make_segmented_blob(b"tel:+14155550123")[16:]
+        )
+        self.assertEqual(
+            helper.decode_attributed_body(blob),
+            "Call me at (415) 555-0123",
+        )
 
     # ---- defensive early-exits -------------------------------------------
 
