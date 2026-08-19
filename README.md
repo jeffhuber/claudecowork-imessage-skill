@@ -7,6 +7,8 @@ endorsed, or supported by Apple or Anthropic.
 
 **Security**: See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
+> **Prefer a Mac app?** A commercial alternative with drag-and-drop installation and automatic updates is available at [messagebridge.app](https://messagebridge.app).
+
 ## What's in the box
 
 - **Skill** `imessage-review` — teaches Claude the full protocol for reading
