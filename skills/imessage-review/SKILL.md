@@ -21,7 +21,7 @@ Use this skill when the user asks to:
 - Find messages that still need a response.
 - Search history for a topic, person, or phrase.
 - Pull a specific conversation's recent messages.
-- Compute response-time statistics (e.g. "average reply time to Angel over the last 24 hours").
+- Compute response-time statistics (e.g. "average reply time to Alice over the last 24 hours").
 - Send a plain-text iMessage to an existing contact.
 
 ## Architecture at a glance
@@ -143,7 +143,7 @@ Response has three buckets: `needs_reply`, `low_priority`, and `skip_summary`
 
 ```json
 {"id": "abc", "action": "chat_history",
- "params": {"chat": "Angel Vossough", "days": 14, "limit": 100}}
+ "params": {"chat": "Alice Example", "days": 14, "limit": 100}}
 ```
 
 `chat` accepts a contact name (resolved via Contacts.app), a phone number
@@ -153,7 +153,7 @@ Response has three buckets: `needs_reply`, `low_priority`, and `skip_summary`
 
 ```json
 {"id": "abc", "action": "response_stats",
- "params": {"chat": "Angel Vossough", "hours": 24}}
+ "params": {"chat": "Alice Example", "hours": 24}}
 ```
 
 Returns `sample_size`, `avg_seconds`, `avg_human` (e.g. `"18.3m"`),
@@ -162,7 +162,7 @@ Returns `sample_size`, `avg_seconds`, `avg_human` (e.g. `"18.3m"`),
 ### `contacts_lookup` — find matching contacts
 
 ```json
-{"id": "abc", "action": "contacts_lookup", "params": {"name": "Angel"}}
+{"id": "abc", "action": "contacts_lookup", "params": {"name": "Alice"}}
 ```
 
 ### `send_preview` — dry-run a send (no osascript, no chat.db)

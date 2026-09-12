@@ -44,7 +44,7 @@ actions share a bridge:
 - *"Triage the last day, then draft replies to anything actionable."*
 - *"Find any mention of 'invoice' in the last 60 days, group by sender."*
 - *"Who has the slowest reply time from me this week? Top 5 with stats."*
-- *"Text Angel back with a thumbs-up and propose Thursday at 2pm instead."*
+- *"Text Alice back with a thumbs-up and propose Thursday at 2pm instead."*
 
 **What the plugin won't do:**
 
