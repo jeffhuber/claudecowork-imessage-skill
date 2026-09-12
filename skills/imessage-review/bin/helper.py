@@ -113,7 +113,7 @@ _PRODUCT_ENV_VARS = (
 )
 WRAPPER_MODE = "product" if any(v in os.environ for v in _PRODUCT_ENV_VARS) else "baked"
 
-HELPER_VERSION = "1.3.0"
+HELPER_VERSION = "1.3.1"
 PROTOCOL_VERSION = "1.2"
 
 # Bridge role. The DIY install and every host bridge run as "host". A
@@ -211,6 +211,11 @@ MAX_DAYS = 90
 MAX_HOURS = 24 * 30
 MAX_LIMIT = 500
 MAX_SEARCH_LEN = 200
+# Snapshot size guard: in-memory snapshots exceeding this limit are rejected.
+# Override with IMESSAGE_SNAPSHOT_MAX_MB. 500 MB fits typical chat.db sizes
+# while avoiding OOM on resource-constrained systems. Operators with larger
+# databases should review memory availability before raising this limit.
+DEFAULT_SNAPSHOT_MAX_MB = 500
 # list_chats has its own window: it returns no bodies, only which threads
 # exist, so a multi-year window is safe and useful for policy discovery.
 MAX_LIST_CHATS_DAYS = 3650
@@ -1212,12 +1217,64 @@ def _run_send_confirmation(
 # ---------------------------------------------------------------------------
 # DB handling
 # ---------------------------------------------------------------------------
-def copy_chatdb() -> Path:
+def _get_snapshot_max_bytes() -> int:
+    """Return the configured snapshot size limit in bytes.
+    
+    Reads IMESSAGE_SNAPSHOT_MAX_MB (integer megabytes) or falls back to
+    DEFAULT_SNAPSHOT_MAX_MB. Invalid values fail closed at the default.
+    """
+    env_value = os.environ.get("IMESSAGE_SNAPSHOT_MAX_MB", "").strip()
+    if not env_value:
+        return DEFAULT_SNAPSHOT_MAX_MB * 1024 * 1024
+    try:
+        mb = int(env_value)
+        if mb <= 0:
+            log(f"IMESSAGE_SNAPSHOT_MAX_MB={mb} invalid; using default {DEFAULT_SNAPSHOT_MAX_MB} MB")
+            return DEFAULT_SNAPSHOT_MAX_MB * 1024 * 1024
+        return mb * 1024 * 1024
+    except ValueError:
+        log(f"IMESSAGE_SNAPSHOT_MAX_MB={env_value!r} invalid; using default {DEFAULT_SNAPSHOT_MAX_MB} MB")
+        return DEFAULT_SNAPSHOT_MAX_MB * 1024 * 1024
+
+
+def copy_chatdb() -> sqlite3.Connection:
+    """Copy chat.db to an in-memory snapshot using SQLite's backup API.
+    
+    Returns an open connection to the in-memory snapshot. The caller is
+    responsible for closing the connection. This eliminates same-UID disk
+    exposure: the snapshot exists only in this process's memory space.
+    
+    Raises RuntimeError if chat.db + chat.db-wal exceeds the configured
+    size limit (IMESSAGE_SNAPSHOT_MAX_MB, default 500 MB). Large databases
+    can cause OOM during the in-memory snapshot; operators should ensure
+    adequate memory before raising the limit. SQLite's backup API includes
+    uncommitted WAL data in the snapshot, so both files count against the limit.
+    """
     if not CHAT_DB_PATH.exists():
         raise RuntimeError(f"chat.db not found at {CHAT_DB_PATH}")
-    fd, tmp = tempfile.mkstemp(prefix="cowork_imessage_", suffix=".db")
-    os.close(fd)
-    snapshot = Path(tmp)
+    
+    # Check size before attempting snapshot to fail fast on OOM risk.
+    # SQLite backup includes WAL data, so count both chat.db and chat.db-wal.
+    try:
+        db_size = CHAT_DB_PATH.stat().st_size
+        wal_path = CHAT_DB_PATH.parent / f"{CHAT_DB_PATH.name}-wal"
+        wal_size = wal_path.stat().st_size if wal_path.exists() else 0
+        total_size = db_size + wal_size
+    except OSError as e:
+        raise RuntimeError(f"cannot stat chat.db or WAL: {e}") from e
+    
+    max_bytes = _get_snapshot_max_bytes()
+    if total_size > max_bytes:
+        max_mb = max_bytes // (1024 * 1024)
+        actual_mb = total_size // (1024 * 1024)
+        db_mb = db_size // (1024 * 1024)
+        wal_mb = wal_size // (1024 * 1024)
+        raise RuntimeError(
+            f"chat.db + WAL size ({actual_mb} MB: {db_mb} MB db + {wal_mb} MB wal) "
+            f"exceeds snapshot limit ({max_mb} MB); "
+            f"set IMESSAGE_SNAPSHOT_MAX_MB to a higher value or archive old messages"
+        )
+    
     source = None
     destination = None
     try:
@@ -1226,34 +1283,26 @@ def copy_chatdb() -> Path:
         # locking/change detection. The online backup API supplies the snapshot.
         source_uri = f"{CHAT_DB_PATH.resolve().as_uri()}?mode=ro&cache=private"
         source = sqlite3.connect(source_uri, uri=True, timeout=5)
-        destination = sqlite3.connect(str(snapshot))
+        # Use in-memory database instead of disk-based tempfile
+        destination = sqlite3.connect(":memory:")
+        destination.text_factory = bytes
         source.backup(destination)
-        return snapshot
+        return destination
     except Exception:
-        cleanup_tmpdb(snapshot)
-        raise
-    finally:
         if destination is not None:
             destination.close()
+        raise
+    finally:
         if source is not None:
             source.close()
 
 
-def cleanup_tmpdb(path: Path) -> None:
-    for suffix in ("", "-wal", "-shm"):
-        p = Path(str(path) + suffix)
-        try:
-            if p.exists():
-                p.unlink()
-        except Exception:
-            pass
-
-
-def open_snapshot(db_path: Path) -> sqlite3.Connection:
-    """Open a completed, private chat.db snapshot without SQLite sidecars."""
-    snapshot_uri = f"{db_path.resolve().as_uri()}?mode=ro&immutable=1"
-    conn = sqlite3.connect(snapshot_uri, uri=True)
-    conn.text_factory = bytes
+def open_snapshot(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Return the in-memory snapshot connection unchanged.
+    
+    This function exists for API compatibility with the disk-based snapshot
+    pattern it replaced. The in-memory snapshot is already open and ready to use.
+    """
     return conn
 
 
@@ -2094,8 +2143,7 @@ def process_request(
         needs_db = getattr(action_fn, "needs_db", True)
         conn = None
         if needs_db:
-            db_path = copy_chatdb()
-            conn = open_snapshot(db_path)
+            conn = copy_chatdb()
         needs_contacts = getattr(action_fn, "needs_contacts", True)
         contacts = load_contacts() if needs_contacts else {}
         result = action_fn(params, conn, contacts, privacy_policy)
@@ -2112,8 +2160,8 @@ def process_request(
             "allowed_actions": sorted(permitted),
         })
     finally:
-        if db_path is not None:
-            cleanup_tmpdb(db_path)
+        if conn is not None:
+            conn.close()
 
 
 def _acquire_bridge_lock(control_fd: int, timeout_s: float = OSASCRIPT_TIMEOUT_S + 10.0) -> int:
