@@ -6,6 +6,14 @@ reported by the `status` action.
 
 ## Unreleased
 
+## 1.3.1 - 2026-09-12
+
+- Restore shared-core parity with grokbot-imessage-skill v1.4.4: add snapshot
+  size limit (DEFAULT_SNAPSHOT_MAX_MB = 500, overridable via IMESSAGE_SNAPSHOT_MAX_MB)
+  with WAL-inclusive pre-backup check to prevent OOM on large databases; migrate
+  to in-memory snapshots (eliminates same-UID tempfile exposure); FDA wrapper
+  pass-through for IMESSAGE_SNAPSHOT_MAX_MB in both product and baked modes.
+
 ## 1.3.0 - 2026-08-16
 
 - Bridge protocol 1.2: add the `list_chats` action, which enumerates threads
