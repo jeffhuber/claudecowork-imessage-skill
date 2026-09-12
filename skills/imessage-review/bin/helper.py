@@ -2160,7 +2160,8 @@ def process_request(
             "allowed_actions": sorted(permitted),
         })
     finally:
-        pass
+        if conn is not None:
+            conn.close()
 
 
 def _acquire_bridge_lock(control_fd: int, timeout_s: float = OSASCRIPT_TIMEOUT_S + 10.0) -> int:
