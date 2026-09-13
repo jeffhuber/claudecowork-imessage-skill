@@ -883,13 +883,17 @@ def _matches_list(chat_id: str, sender: str, entries: tuple[str, ...] | list[str
     snd_l10 = _last10(snd)
     for entry in entries:
         entry_l10 = _last10(entry)
+        # Phone number: match last 10 digits
         if entry_l10 and (entry_l10 == cid_l10 or entry_l10 == snd_l10):
             return True
         if not entry_l10:
             lowered = entry.lower()
+            # Email: exact case-insensitive match
             if "@" in entry and (lowered == cid.lower() or lowered == snd.lower()):
                 return True
-            if "@" not in entry and (lowered in cid.lower() or lowered in snd.lower()):
+            # Group chat ID: exact case-insensitive match (not substring)
+            # to prevent "chat123" from matching "chat1234567890"
+            if "@" not in entry and (lowered == cid.lower() or lowered == snd.lower()):
                 return True
     return False
 
@@ -1149,10 +1153,9 @@ def _escape_as_string(s: str) -> str:
     """Escape a Python string for embedding as an AppleScript string literal.
 
     AppleScript string literals are double-quoted; only `"` and `\\` need
-    to be escaped. We do NOT try to escape arbitrary message bodies this
-    way — those are handed to AppleScript via a tempfile to sidestep the
-    whole class of escaping bugs. This helper is for short, already-
-    validated fields like the recipient identifier and the tempfile path.
+    to be escaped (in that order: backslash first to avoid double-escaping).
+    This is used for recipient identifiers and message bodies that have
+    already passed validation (printable Unicode + safe whitespace only).
     """
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -1297,15 +1300,6 @@ def copy_chatdb() -> sqlite3.Connection:
             source.close()
 
 
-def open_snapshot(conn: sqlite3.Connection) -> sqlite3.Connection:
-    """Return the in-memory snapshot connection unchanged.
-    
-    This function exists for API compatibility with the disk-based snapshot
-    pattern it replaced. The in-memory snapshot is already open and ready to use.
-    """
-    return conn
-
-
 def to_apple_ns(unix_seconds: float) -> int:
     return int((unix_seconds - APPLE_EPOCH) * 1_000_000_000)
 
@@ -1395,7 +1389,7 @@ def filter_contacts(
 
 
 # ---------------------------------------------------------------------------
-# Chat resolution: "Alice Example" | phone | email -> chat_identifier substring
+# Chat resolution: "Alex Example" | phone | email -> chat_identifier substring
 # ---------------------------------------------------------------------------
 def resolve_chat_filter(q: str, contacts: dict[str, str]) -> str:
     """Return a substring suitable for matching chat_identifier/sender."""
@@ -1635,6 +1629,9 @@ def action_contacts_lookup(params, conn, contacts, privacy_policy):
     return {"query": name, "match_count": len(matches), "matches": matches[:25]}
 
 
+action_contacts_lookup.needs_db = False  # type: ignore[attr-defined]
+
+
 # chat.style in chat.db is IMChatStyle: 43 (ASCII '+') = group chat,
 # 45 (ASCII '-') = one-to-one "instant message" chat. Same mapping as
 # ENGINEERING_PLAN §2.4 and the review classifier's chat-id heuristic.
@@ -1861,12 +1858,15 @@ action_send_preview.needs_db = False  # type: ignore[attr-defined]
 def action_send(params, conn, contacts, privacy_policy):
     """Send an iMessage (or SMS via iPhone relay) via AppleScript.
 
-    The message body is written to a tempfile and read by AppleScript as
-    UTF-8, which sidesteps every AppleScript string-escape bug and lets us
-    send arbitrary Unicode (including emoji and newlines) unchanged.
+    The message body is escaped and embedded directly in the AppleScript code,
+    eliminating the tempfile race where a same-UID process could swap the file
+    between write and AppleScript read. validate_send_text rejects control
+    characters (except \\n, \\r, \\t), so the text is printable Unicode plus
+    safe whitespace. _escape_as_string escapes backslash and double-quote for
+    AppleScript string literals.
 
-    Recipient identifiers are escaped inline as AppleScript string literals
-    because they've already passed `validate_send_recipient` (≤200 chars, stripped).
+    Recipient identifiers are also escaped inline as AppleScript string literals
+    after passing validate_send_recipient (≤200 chars, stripped).
 
     The `service type` slot is an AppleScript enum, not a string. We pick
     the clause statically from the validated service name so no untrusted
@@ -1911,34 +1911,22 @@ def action_send(params, conn, contacts, privacy_policy):
     else:  # SMS — already validated against _SERVICE_ENUM
         svc_clause = "1st service whose service type = SMS"
 
-    # Write the body to a tempfile, give AppleScript a POSIX path to it.
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", suffix=".txt", delete=False,
-        prefix="cowork_imessage_send_",
-    ) as f:
-        f.write(text)
-        body_path = f.name
-
-    try:
-        script = (
-            f'set msgBody to read POSIX file "{_escape_as_string(body_path)}" '
-            f'as «class utf8»\n'
-            f'tell application "Messages"\n'
-            f'    set svc to {svc_clause}\n'
-            f'    send msgBody to buddy "{_escape_as_string(to)}" of svc\n'
-            f'end tell\n'
+    # Pass the body directly in the AppleScript with proper escaping.
+    # This eliminates the tempfile race where a malicious same-UID process
+    # could replace the file between write and read.
+    script = (
+        f'set msgBody to "{_escape_as_string(text)}"\n'
+        f'tell application "Messages"\n'
+        f'    set svc to {svc_clause}\n'
+        f'    send msgBody to buddy "{_escape_as_string(to)}" of svc\n'
+        f'end tell\n'
+    )
+    rc, stdout, stderr = _run_osascript(script)
+    if rc != 0:
+        raise RuntimeError(
+            f"osascript send failed (rc={rc}): "
+            f"{stderr or stdout or 'no output'}"
         )
-        rc, stdout, stderr = _run_osascript(script)
-        if rc != 0:
-            raise RuntimeError(
-                f"osascript send failed (rc={rc}): "
-                f"{stderr or stdout or 'no output'}"
-            )
-    finally:
-        try:
-            os.unlink(body_path)
-        except OSError:
-            pass
 
     return {
         "sent": {
@@ -2135,13 +2123,12 @@ def process_request(
         })
         return
 
-    db_path = None
+    conn = None
     try:
         action_fn = ACTIONS[action]
         # Send-side actions declare needs_db=False; skip the (potentially
         # hundreds-of-MB) chat.db snapshot on that path.
         needs_db = getattr(action_fn, "needs_db", True)
-        conn = None
         if needs_db:
             conn = copy_chatdb()
         needs_contacts = getattr(action_fn, "needs_contacts", True)
