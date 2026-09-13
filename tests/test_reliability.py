@@ -59,17 +59,17 @@ class SQLiteBackupTests(unittest.TestCase):
                 writer.execute("INSERT INTO sample VALUES ('wal-header')")
                 writer.commit()
 
-                with mock.patch.object(helper, "CHAT_DB_PATH", source):
-                    snapshot = helper.copy_chatdb()
-                self.addCleanup(snapshot.close)
+            with mock.patch.object(helper, "CHAT_DB_PATH", source):
+                conn = helper.copy_chatdb()
+            self.addCleanup(conn.close)
 
-            # In-memory snapshot: no sidecars to check
-            # The snapshot is already open and ready to use
-            opened = helper.open_snapshot(snapshot)
-            self.assertEqual(
-                opened.execute("SELECT value FROM sample").fetchall(),
-                [(b"wal-header",)],
-            )
+        # In-memory database shouldn't trigger WAL journal mode
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()
+        self.assertIn(journal_mode[0].lower(), (b"delete", b"memory"))
+        self.assertEqual(
+            conn.execute("SELECT value FROM sample").fetchall(),
+            [(b"wal-header",)],
+        )
 
 
 class StatusAndQueueTests(unittest.TestCase):

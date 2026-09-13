@@ -802,14 +802,15 @@ int main(int argc, char **argv) {
         NULL,
     };
 
+    size_t host_next = (sizeof(new_env_host) / sizeof(new_env_host[0])) - 3;
+    size_t manager_next = (sizeof(new_env_manager) / sizeof(new_env_manager[0])) - 3;
     if (host_icon_available) {
-        new_env_host[(sizeof(new_env_host) / sizeof(new_env_host[0])) - 3] = env_host_icon;
-        new_env_manager[(sizeof(new_env_manager) / sizeof(new_env_manager[0])) - 3] = env_host_icon;
+        new_env_host[host_next++] = env_host_icon;
+        new_env_manager[manager_next++] = env_host_icon;
     }
-
     if (snapshot_max_mb_set) {
-        new_env_host[(sizeof(new_env_host) / sizeof(new_env_host[0])) - 2] = env_snapshot_max_mb;
-        new_env_manager[(sizeof(new_env_manager) / sizeof(new_env_manager[0])) - 2] = env_snapshot_max_mb;
+        new_env_host[host_next++] = env_snapshot_max_mb;
+        new_env_manager[manager_next++] = env_snapshot_max_mb;
     }
 
     environ = is_host ? new_env_host : new_env_manager;
