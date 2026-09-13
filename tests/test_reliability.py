@@ -31,18 +31,24 @@ class SQLiteBackupTests(unittest.TestCase):
 
                 with mock.patch.object(helper, "CHAT_DB_PATH", source):
                     snapshot = helper.copy_chatdb()
-                self.addCleanup(helper.cleanup_tmpdb, snapshot)
+                self.addCleanup(snapshot.close)
 
-            with sqlite3.connect(str(snapshot)) as reader:
-                self.assertEqual(
-                    reader.execute("SELECT value FROM sample").fetchall(),
-                    [("from-live-wal",)],
-                )
-                self.assertEqual(
-                    reader.execute("PRAGMA integrity_check").fetchone(), ("ok",)
-                )
+            # snapshot is now an in-memory connection, not a file path
+            self.assertEqual(
+                snapshot.execute("SELECT value FROM sample").fetchall(),
+                [(b"from-live-wal",)],
+            )
+            # PRAGMA results may not use text_factory, so check both forms
+            integrity = snapshot.execute("PRAGMA integrity_check").fetchone()[0]
+            self.assertIn(integrity, (b"ok", "ok"))
 
     def test_production_open_reads_wal_snapshot_without_sidecars(self) -> None:
+        """Test that in-memory snapshots work correctly without WAL sidecars.
+        
+        With the in-memory snapshot approach, there are no -wal or -shm files
+        because the snapshot exists entirely in memory. This test verifies that
+        the snapshot can be used directly and contains the expected data.
+        """
         with tempfile.TemporaryDirectory(prefix="claude-imessage-wal-open-") as td:
             source = Path(td) / "chat.db"
             with sqlite3.connect(str(source)) as writer:
@@ -53,23 +59,17 @@ class SQLiteBackupTests(unittest.TestCase):
                 writer.execute("INSERT INTO sample VALUES ('wal-header')")
                 writer.commit()
 
-                with mock.patch.object(helper, "CHAT_DB_PATH", source):
-                    snapshot = helper.copy_chatdb()
-                self.addCleanup(helper.cleanup_tmpdb, snapshot)
+            with mock.patch.object(helper, "CHAT_DB_PATH", source):
+                conn = helper.copy_chatdb()
+            self.addCleanup(conn.close)
 
-            wal_path = Path(f"{snapshot}-wal")
-            shm_path = Path(f"{snapshot}-shm")
-            self.assertEqual(snapshot.read_bytes()[18:20], b"\x02\x02")
-            self.assertFalse(wal_path.exists())
-            self.assertFalse(shm_path.exists())
-
-            with helper.open_snapshot(snapshot) as reader:
-                self.assertEqual(
-                    reader.execute("SELECT value FROM sample").fetchall(),
-                    [(b"wal-header",)],
-                )
-                self.assertFalse(wal_path.exists())
-                self.assertFalse(shm_path.exists())
+        # In-memory database shouldn't trigger WAL journal mode
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()
+        self.assertIn(journal_mode[0].lower(), (b"delete", b"memory"))
+        self.assertEqual(
+            conn.execute("SELECT value FROM sample").fetchall(),
+            [(b"wal-header",)],
+        )
 
 
 class StatusAndQueueTests(unittest.TestCase):

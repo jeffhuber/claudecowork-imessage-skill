@@ -10,9 +10,9 @@ Coverage:
   - _escape_as_string — AppleScript string-literal escaping.
   - action_send_preview — is non-destructive, resolves contact names,
     surfaces the blocked flag.
-  - action_send — builds the right AppleScript, refuses to send to
-    blocked targets, cleans up the tempfile even on failure, maps a
-    nonzero osascript exit into a RuntimeError.
+  - action_send — builds the right AppleScript with inline escaped body,
+    refuses to send to blocked targets, maps a nonzero osascript exit
+    into a RuntimeError.
 """
 from __future__ import annotations
 
@@ -289,16 +289,19 @@ class SendActionTests(_BridgeDirMixin, unittest.TestCase):
         self.assertIn('tell application "Messages"', script)
         self.assertIn("service type = iMessage", script)
         self.assertIn('buddy "+14155551234"', script)
-        self.assertIn("read POSIX file", script)
-        # The body itself must NOT be in the script — it goes via tempfile.
-        self.assertNotIn("hi\n", script)
+        # Inline escaping: body is embedded directly in the script
+        self.assertIn('set msgBody to "hi"', script)
+        self.assertIn('send msgBody', script)
 
     def test_script_shape_sms(self):
         _, captured = self._run(
             {"to": "+14155551234", "text": "hi", "service": "SMS"},
         )
-        self.assertIn("service type = SMS", captured["script"])
-        self.assertNotIn("service type = iMessage", captured["script"])
+        script = captured["script"]
+        self.assertIn("service type = SMS", script)
+        self.assertNotIn("service type = iMessage", script)
+        # Inline escaping: body is embedded directly in the script
+        self.assertIn('set msgBody to "hi"', script)
 
     def test_malformed_recipient_is_rejected(self):
         for recipient in (
@@ -312,47 +315,23 @@ class SendActionTests(_BridgeDirMixin, unittest.TestCase):
             ):
                 self._run({"to": recipient, "text": "x"})
 
-    def test_body_goes_to_tempfile(self):
-        # Verify the POSIX-file path referenced in the script actually
-        # existed during the call — by capturing it and checking that
-        # after the call the file has been cleaned up.
-        captured = {}
+    def test_body_embedded_inline_with_escaping(self):
+        # Verify the body is embedded directly in the AppleScript with
+        # proper escaping (backslash and double-quote).
+        _, captured = self._run(
+            {"to": "+14155551234", "text": 'hello "world" \\test 🎉'},
+        )
+        script = captured["script"]
+        # Backslashes and quotes should be escaped
+        self.assertIn('set msgBody to "hello \\"world\\" \\\\test 🎉"', script)
+        # No tempfile references
+        self.assertNotIn("POSIX file", script)
+        self.assertNotIn("tempfile", script.lower())
 
+    def test_osascript_failure_raises_runtime_error(self):
+        # Simulate osascript exiting nonzero — action_send must raise
+        # RuntimeError with the error message.
         def fake_run(script, timeout=None):
-            captured["script"] = script
-            # Parse out the POSIX file path.
-            import re
-            m = re.search(r'read POSIX file "([^"]+)"', script)
-            self.assertIsNotNone(m)
-            captured["path"] = m.group(1).replace("\\\\", "\\")
-            # While osascript is "running" the file should still exist.
-            self.assertTrue(os.path.exists(captured["path"]))
-            with open(captured["path"], encoding="utf-8") as f:
-                captured["body_content"] = f.read()
-            return (0, "", "")
-
-        with mock.patch.object(
-            helper, "_run_send_confirmation", return_value=True
-        ), mock.patch.object(helper, "_run_osascript", side_effect=fake_run):
-            helper.action_send(
-                {"to": "+14155551234", "text": "body via tempfile 🎉",
-                 "send_nonce": _mint("+14155551234", "body via tempfile 🎉")},
-                None, self.contacts, self.blocklist,
-            )
-
-        self.assertEqual(captured["body_content"], "body via tempfile 🎉")
-        # After the call, the tempfile must be gone.
-        self.assertFalse(os.path.exists(captured["path"]))
-
-    def test_tempfile_cleaned_up_on_failure(self):
-        # Simulate osascript exiting nonzero — the finally: block must
-        # still delete the tempfile.
-        captured = {}
-
-        def fake_run(script, timeout=None):
-            import re
-            m = re.search(r'read POSIX file "([^"]+)"', script)
-            captured["path"] = m.group(1).replace("\\\\", "\\")
             return (1, "", "Messages got an error: not authorized")
 
         with mock.patch.object(
@@ -366,8 +345,6 @@ class SendActionTests(_BridgeDirMixin, unittest.TestCase):
                 )
 
         self.assertIn("not authorized", str(ctx.exception))
-        self.assertFalse(os.path.exists(captured["path"]),
-                         "tempfile leaked after osascript failure")
 
     def test_blocked_target_refused(self):
         # No osascript call should happen at all.
