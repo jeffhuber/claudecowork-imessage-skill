@@ -6,6 +6,19 @@ reported by the `status` action.
 
 ## Unreleased
 
+## 1.4.7 - 2026-09-13
+
+- Sync shared-core from grokbot-imessage-skill v1.4.7 (post-iMessage #53): raised
+  default snapshot size limit from 500 MB to 1024 MB (DEFAULT_SNAPSHOT_MAX_MB) to
+  accommodate larger local chat.db files without manual override; improved group
+  chat ID matching to prevent collision between "chat1234567890" group IDs and
+  phone numbers ending in those digits (exact case-insensitive match required for
+  group IDs, never via last-10 digits); allowlist/blocklist handling now checks
+  group status independently for chat_id and sender before applying last-10 phone
+  matching rules; updated helper.py docstring to accurately reflect in-memory
+  snapshot implementation (SQLite backup API) rather than outdated tempfile
+  description.
+
 ## 1.3.1 - 2026-09-12
 
 - Restore shared-core parity with grokbot-imessage-skill v1.4.4: add snapshot
