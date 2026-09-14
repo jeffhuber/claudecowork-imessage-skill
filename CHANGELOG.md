@@ -6,6 +6,18 @@ reported by the `status` action.
 
 ## Unreleased
 
+## 1.4.8 - 2026-09-13
+
+- Sync shared-core from grokbot-imessage-skill v1.4.8 (post-iMessage #54): fixed
+  `configure_allowlist.py` to work with hardened install layout where the
+  allowlist parent directory is root-owned; the tool now stages its tempfile in
+  a user-owned private directory (under `/tmp`) instead of attempting to write
+  to the root-owned config directory, while maintaining all security checks and
+  using `sudo install` to atomically place the file in its final location;
+  added pre-install and post-install symlink checks to prevent TOCTOU attacks;
+  added validation tests for allowlist configuration with root-owned parent
+  directories.
+
 ## 1.4.7 - 2026-09-13
 
 - Sync shared-core from grokbot-imessage-skill v1.4.7 (post-iMessage #53): raised
